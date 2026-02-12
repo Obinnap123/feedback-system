@@ -50,8 +50,8 @@ export default function DashboardLayout({
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="md:flex">
-        <header className="flex items-center justify-between border-b border-slate-800/80 bg-slate-950/80 px-4 py-3 md:hidden">
+      <div className="relative min-h-screen">
+        <header className="flex items-center justify-between border-b border-slate-800/80 bg-slate-950/80 px-4 py-3 lg:hidden">
           <div className="flex items-center gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-500/20 text-indigo-200">
               <GraduationCap className="h-5 w-5" />
@@ -72,7 +72,7 @@ export default function DashboardLayout({
         </header>
 
         <div
-          className={`fixed inset-0 z-40 bg-slate-950/70 transition md:hidden ${
+          className={`fixed inset-0 z-40 bg-slate-950/70 transition lg:hidden ${
             sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0"
           }`}
           onClick={closeSidebar}
@@ -80,7 +80,7 @@ export default function DashboardLayout({
         />
 
         <aside
-          className={`fixed inset-y-0 left-0 z-50 w-72 border-r border-slate-800/80 bg-slate-900 transition-transform md:static md:w-64 md:translate-x-0 ${
+          className={`fixed inset-y-0 left-0 z-50 w-72 border-r border-slate-800/80 bg-slate-900 transition-transform lg:w-64 lg:translate-x-0 lg:overflow-y-auto ${
             sidebarOpen ? "translate-x-0" : "-translate-x-full"
           }`}
         >
@@ -98,7 +98,7 @@ export default function DashboardLayout({
               <button
                 type="button"
                 onClick={closeSidebar}
-                className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-800/80 text-slate-200 transition hover:border-indigo-400/60 hover:text-white md:hidden"
+                className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-800/80 text-slate-200 transition hover:border-indigo-400/60 hover:text-white lg:hidden"
                 aria-label="Close sidebar"
               >
                 <X className="h-4 w-4" />
@@ -166,7 +166,7 @@ export default function DashboardLayout({
           </div>
         </aside>
 
-        <main className="flex-1 bg-slate-950/70">
+        <main className="bg-slate-950/70 lg:pl-64">
           <div className="min-h-screen">{children}</div>
         </main>
       </div>

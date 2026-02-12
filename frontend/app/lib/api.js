@@ -18,8 +18,11 @@ export const registerUser = (payload) => api.post("/auth/register", payload);
 export const fetchAdminDashboard = (token) =>
   api.get("/dashboard/admin", { headers: buildAuthHeaders(token) });
 
-export const fetchLecturerDashboard = (token) =>
-  api.get("/dashboard/lecturer", { headers: buildAuthHeaders(token) });
+export const fetchLecturerDashboard = (token, params = {}) =>
+  api.get("/dashboard/lecturer", {
+    headers: buildAuthHeaders(token),
+    params,
+  });
 
 export const fetchAdminRatings = (token) =>
   api.get("/dashboard/admin/ratings", { headers: buildAuthHeaders(token) });

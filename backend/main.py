@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -109,10 +109,42 @@ class ToxicityLogEntry(BaseModel):
     last_seen: Optional[str] = None
 
 
+class SemesterOption(BaseModel):
+    value: str
+    label: str
+    range: str
+
+
+class CourseBreakdown(BaseModel):
+    course_code: str
+    avg_rating: Optional[float]
+    count: int
+
+
 class LecturerDashboardResponse(BaseModel):
     total_feedbacks: int
     avg_rating: Optional[float]
     cleaned_comments: List[str]
+    current_semester: str
+    current_semester_range: str
+    previous_semester: str
+    previous_semester_range: str
+    current_avg_rating: Optional[float]
+    previous_avg_rating: Optional[float]
+    current_feedbacks: int
+    previous_feedbacks: int
+    total_avg_rating: Optional[float]
+    rating_distribution: List[int]
+    positive_pct: float
+    neutral_pct: float
+    negative_pct: float
+    insight_delta: Optional[float]
+    course_breakdown: List[CourseBreakdown]
+    available_courses: List[str]
+    available_semesters: List[SemesterOption]
+    selected_semester: str
+    selected_course: Optional[str]
+    last_synced_at: str
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -162,6 +194,62 @@ def require_role(*roles: UserRole):
         return user
 
     return _role_dependency
+
+
+def _semester_index(semester_type: str, year: int) -> int:
+    return year * 2 + (1 if semester_type == "HARMATTAN" else 0)
+
+
+def _semester_from_index(index: int) -> Tuple[str, int]:
+    year = index // 2
+    if index % 2 == 0:
+        return "RAIN", year
+    return "HARMATTAN", year
+
+
+def _semester_from_date(value: datetime) -> Tuple[str, int]:
+    if value.month >= 10:
+        return "HARMATTAN", value.year
+    if value.month <= 3:
+        return "HARMATTAN", value.year - 1
+    return "RAIN", value.year
+
+
+def _semester_label(semester_type: str, year: int) -> str:
+    if semester_type == "HARMATTAN":
+        return f"Harmattan {year}/{year + 1}"
+    return f"Rain {year}"
+
+
+def _semester_window(semester_type: str, year: int) -> Tuple[datetime, datetime]:
+    if semester_type == "HARMATTAN":
+        return (
+            datetime(year, 10, 1, tzinfo=timezone.utc),
+            datetime(year + 1, 4, 1, tzinfo=timezone.utc),
+        )
+    return (
+        datetime(year, 4, 1, tzinfo=timezone.utc),
+        datetime(year, 10, 1, tzinfo=timezone.utc),
+    )
+
+
+def _semester_range_label(start: datetime, end: datetime) -> str:
+    end_inclusive = end - timedelta(days=1)
+    return f"{start:%b %d, %Y} - {end_inclusive:%b %d, %Y}"
+
+
+def _semester_value(semester_type: str, year: int) -> str:
+    return f"{semester_type}-{year}"
+
+
+def _parse_semester(value: str) -> Optional[Tuple[str, int]]:
+    try:
+        semester_type, year_text = value.strip().upper().split("-", 1)
+        if semester_type not in {"HARMATTAN", "RAIN"}:
+            return None
+        return semester_type, int(year_text)
+    except Exception:
+        return None
 
 
 @app.post("/auth/register", response_model=RegisterResponse)
@@ -368,24 +456,155 @@ def admin_toxicity_log(
 
 @app.get("/dashboard/lecturer", response_model=LecturerDashboardResponse)
 def lecturer_dashboard(
+    semester: Optional[str] = None,
+    course_code: Optional[str] = None,
     user: User = Depends(require_role(UserRole.LECTURER)),
     db: Session = Depends(get_db),
 ) -> LecturerDashboardResponse:
-    total_feedbacks = (
-        db.query(func.count(Feedback.id))
+    now = datetime.now(timezone.utc)
+    base_query = db.query(Feedback).filter(Feedback.lecturer_id == user.id)
+    normalized_course = course_code.strip().upper() if course_code else None
+    scoped_query = base_query
+    if normalized_course:
+        scoped_query = scoped_query.filter(Feedback.course_code == normalized_course)
+
+    breakdown_rows = (
+        db.query(
+            Feedback.course_code.label("course_code"),
+            func.avg(Feedback.rating).label("avg_rating"),
+            func.count(Feedback.id).label("count"),
+        )
         .filter(Feedback.lecturer_id == user.id)
-        .scalar()
-        or 0
+        .group_by(Feedback.course_code)
+        .order_by(Feedback.course_code.asc())
+        .all()
     )
-    avg_rating = (
-        db.query(func.avg(Feedback.rating))
-        .filter(Feedback.lecturer_id == user.id)
-        .scalar()
+    course_breakdown = [
+        CourseBreakdown(
+            course_code=row.course_code,
+            avg_rating=float(row.avg_rating) if row.avg_rating is not None else None,
+            count=int(row.count or 0),
+        )
+        for row in breakdown_rows
+        if row.course_code
+    ]
+    available_courses = [item.course_code for item in course_breakdown]
+
+    min_created = (
+        scoped_query.with_entities(func.min(Feedback.created_at)).scalar()
+    )
+    max_created = (
+        scoped_query.with_entities(func.max(Feedback.created_at)).scalar()
     )
 
+    if min_created and max_created:
+        start_type, start_year = _semester_from_date(min_created)
+        end_type, end_year = _semester_from_date(max_created)
+    else:
+        start_type, start_year = _semester_from_date(now)
+        end_type, end_year = _semester_from_date(now)
+
+    start_index = _semester_index(start_type, start_year)
+    end_index = _semester_index(end_type, end_year)
+    if end_index < start_index:
+        start_index, end_index = end_index, start_index
+
+    available_semesters: List[SemesterOption] = []
+    for index in range(start_index, end_index + 1):
+        sem_type, sem_year = _semester_from_index(index)
+        sem_start, sem_end = _semester_window(sem_type, sem_year)
+        available_semesters.append(
+            SemesterOption(
+                value=_semester_value(sem_type, sem_year),
+                label=_semester_label(sem_type, sem_year),
+                range=_semester_range_label(sem_start, sem_end),
+            )
+        )
+
+    parsed = _parse_semester(semester) if semester else None
+    if parsed:
+        selected_type, selected_year = parsed
+    else:
+        selected_type, selected_year = _semester_from_date(now)
+
+    selected_index = _semester_index(selected_type, selected_year)
+    selected_start, selected_end = _semester_window(selected_type, selected_year)
+    selected_label = _semester_label(selected_type, selected_year)
+    selected_range = _semester_range_label(selected_start, selected_end)
+    selected_value = _semester_value(selected_type, selected_year)
+
+    prev_type, prev_year = _semester_from_index(selected_index - 1)
+    prev_start, prev_end = _semester_window(prev_type, prev_year)
+    prev_label = _semester_label(prev_type, prev_year)
+    prev_range = _semester_range_label(prev_start, prev_end)
+
+    if not any(option.value == selected_value for option in available_semesters):
+        available_semesters.append(
+            SemesterOption(
+                value=selected_value,
+                label=selected_label,
+                range=selected_range,
+            )
+        )
+        available_semesters.sort(
+            key=lambda option: _semester_index(
+                *_parse_semester(option.value)  # type: ignore[arg-type]
+            )
+        )
+
+    current_feedbacks = (
+        scoped_query.filter(Feedback.created_at >= selected_start)
+        .filter(Feedback.created_at < selected_end)
+        .count()
+    )
+    current_avg = (
+        scoped_query.with_entities(func.avg(Feedback.rating))
+        .filter(Feedback.created_at >= selected_start)
+        .filter(Feedback.created_at < selected_end)
+        .scalar()
+    )
+    previous_feedbacks = (
+        scoped_query.filter(Feedback.created_at >= prev_start)
+        .filter(Feedback.created_at < prev_end)
+        .count()
+    )
+    previous_avg = (
+        scoped_query.with_entities(func.avg(Feedback.rating))
+        .filter(Feedback.created_at >= prev_start)
+        .filter(Feedback.created_at < prev_end)
+        .scalar()
+    )
+    distribution_rows = (
+        scoped_query.with_entities(Feedback.rating, func.count(Feedback.id))
+        .filter(Feedback.created_at >= selected_start)
+        .filter(Feedback.created_at < selected_end)
+        .group_by(Feedback.rating)
+        .all()
+    )
+    distribution_map = {
+        int(rating): int(count) for rating, count in distribution_rows if rating
+    }
+    rating_distribution = [distribution_map.get(value, 0) for value in range(1, 6)]
+    distribution_total = sum(rating_distribution)
+    negative_count = rating_distribution[0] + rating_distribution[1]
+    neutral_count = rating_distribution[2]
+    positive_count = rating_distribution[3] + rating_distribution[4]
+    positive_pct = (positive_count / distribution_total * 100.0) if distribution_total else 0.0
+    neutral_pct = (neutral_count / distribution_total * 100.0) if distribution_total else 0.0
+    negative_pct = (negative_count / distribution_total * 100.0) if distribution_total else 0.0
+
+    insight_delta = (
+        float(current_avg) - float(previous_avg)
+        if current_avg is not None and previous_avg is not None
+        else None
+    )
+
+    total_feedbacks = scoped_query.count()
+    total_avg = scoped_query.with_entities(func.avg(Feedback.rating)).scalar()
+
     feedbacks = (
-        db.query(Feedback)
-        .filter(Feedback.lecturer_id == user.id)
+        scoped_query.filter(Feedback.created_at >= selected_start)
+        .filter(Feedback.created_at < selected_end)
         .order_by(Feedback.created_at.desc())
         .all()
     )
@@ -395,6 +614,26 @@ def lecturer_dashboard(
 
     return LecturerDashboardResponse(
         total_feedbacks=total_feedbacks,
-        avg_rating=avg_rating,
+        avg_rating=current_avg,
         cleaned_comments=cleaned_comments,
+        current_semester=selected_label,
+        current_semester_range=selected_range,
+        previous_semester=prev_label,
+        previous_semester_range=prev_range,
+        current_avg_rating=current_avg,
+        previous_avg_rating=previous_avg,
+        current_feedbacks=current_feedbacks,
+        previous_feedbacks=previous_feedbacks,
+        total_avg_rating=total_avg,
+        rating_distribution=rating_distribution,
+        positive_pct=positive_pct,
+        neutral_pct=neutral_pct,
+        negative_pct=negative_pct,
+        insight_delta=insight_delta,
+        course_breakdown=course_breakdown,
+        available_courses=available_courses,
+        available_semesters=available_semesters,
+        selected_semester=selected_value,
+        selected_course=normalized_course,
+        last_synced_at=now.isoformat(),
     )
