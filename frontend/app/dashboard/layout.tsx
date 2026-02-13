@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import {
   GraduationCap,
@@ -12,45 +12,52 @@ import {
   X,
 } from "lucide-react";
 
+const readRoleFromCookie = (): string | null => {
+  if (typeof document === "undefined") return null;
+  const cookies = document.cookie.split("; ").map((item) => item.trim());
+  const tokenCookie = cookies.find(
+    (cookie) =>
+      cookie.startsWith("access_token=") ||
+      cookie.startsWith("token=") ||
+      cookie.startsWith("jwt="),
+  );
+  const token = tokenCookie?.split("=")[1];
+  if (!token) return null;
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(atob(parts[1]));
+    const rawRole = payload?.role || payload?.user_role || payload?.type || null;
+    return typeof rawRole === "string" ? rawRole.toUpperCase() : null;
+  } catch {
+    return null;
+  }
+};
+
+const subscribeNoop = () => () => {};
+
 export default function DashboardLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const role = useSyncExternalStore(
+    subscribeNoop,
+    readRoleFromCookie,
+    () => null,
+  );
 
   const closeSidebar = () => setSidebarOpen(false);
   const toggleSidebar = () => setSidebarOpen((open) => !open);
-
-  const role = useMemo(() => {
-    if (typeof document === "undefined") return null;
-    const cookies = document.cookie.split("; ").map((item) => item.trim());
-    const tokenCookie = cookies.find(
-      (cookie) =>
-        cookie.startsWith("access_token=") ||
-        cookie.startsWith("token=") ||
-        cookie.startsWith("jwt="),
-    );
-    const token = tokenCookie?.split("=")[1];
-    if (!token) return null;
-    const parts = token.split(".");
-    if (parts.length < 2) return null;
-    try {
-      const payload = JSON.parse(atob(parts[1]));
-      const rawRole = payload?.role || payload?.user_role || payload?.type || null;
-      return typeof rawRole === "string" ? rawRole.toUpperCase() : null;
-    } catch {
-      return null;
-    }
-  }, []);
 
   const showAdmin = role === "ADMIN";
   const showLecturer = role === "LECTURER";
   const showStudent = role === "STUDENT";
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="relative min-h-screen">
+    <div className="min-h-screen overflow-x-hidden bg-slate-950 text-slate-100">
+      <div className="relative min-h-screen overflow-x-hidden">
         <header className="flex items-center justify-between border-b border-slate-800/80 bg-slate-950/80 px-4 py-3 lg:hidden">
           <div className="flex items-center gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-500/20 text-indigo-200">

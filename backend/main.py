@@ -1,22 +1,34 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from passlib.exc import UnknownHashError
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from database import Base, engine, get_db
-from models import Feedback, FeedbackToken, User, UserRole
-from utils import clean_feedback_text, enforce_toxicity_guard
+from models import (
+    CourseAssignment,
+    Feedback,
+    FeedbackFlagReview,
+    FeedbackToken,
+    FlagReviewAction,
+    ToxicityRejectedAttempt,
+    User,
+    UserRole,
+)
+from utils import clean_feedback_text, is_toxic_text
 
 
 SECRET_KEY = "change-me"
@@ -64,7 +76,7 @@ class TokenResponse(BaseModel):
 
 class FeedbackSubmitRequest(BaseModel):
     token: str
-    rating: int
+    rating: int = Field(ge=1, le=5)
     text: Optional[str] = None
     sentiment_score: Optional[float] = 0.0
 
@@ -72,17 +84,47 @@ class FeedbackSubmitRequest(BaseModel):
 class FeedbackSubmitResponse(BaseModel):
     id: int
     message: str
+    is_flagged: bool
+
+
+class KPICard(BaseModel):
+    key: str
+    label: str
+    value: str
+    icon: str
 
 
 class AdminDashboardResponse(BaseModel):
     total_feedbacks: int
+    global_average: Optional[float]
+    participation_rate: float
+    pending_alerts: int
+    kpi_cards: List[KPICard]
+    # Legacy fields retained for compatibility with existing clients.
     avg_rating: Optional[float]
     toxicity_hit_rate: float
 
 
 class LecturerOption(BaseModel):
     id: int
-    email: EmailStr
+    email: str
+
+
+class CourseAssignmentCreateRequest(BaseModel):
+    lecturer_id: int
+    course_code: str = Field(min_length=2, max_length=50)
+
+
+class CourseAssignmentResponse(BaseModel):
+    id: int
+    lecturer_id: int
+    lecturer_email: str
+    course_code: str
+    created_at: str
+
+
+class ActionResponse(BaseModel):
+    message: str
 
 
 class TokenGenerateRequest(BaseModel):
@@ -97,7 +139,32 @@ class TokenGenerateResponse(BaseModel):
     tokens: List[str]
 
 
+class TokenTrackerResponse(BaseModel):
+    course_code: str
+    used_tokens: int
+    total_tokens: int
+    usage_pct: float
+
+
+class TokenListResponse(BaseModel):
+    token: str
+    course_code: str
+    lecturer_id: int
+    lecturer_email: str
+    is_used: bool
+    created_at: str
+    used_at: Optional[str]
+
+
 class LecturerRatingResponse(BaseModel):
+    lecturer: str
+    avg_rating: float
+    total_feedbacks: int
+
+
+class LeaderboardEntry(BaseModel):
+    rank: int
+    lecturer_id: int
     lecturer: str
     avg_rating: float
     total_feedbacks: int
@@ -107,6 +174,20 @@ class ToxicityLogEntry(BaseModel):
     keyword: str
     count: int
     last_seen: Optional[str] = None
+
+
+class ToxicityFeedEntry(BaseModel):
+    item_type: str
+    item_id: int
+    lecturer_id: Optional[int] = None
+    lecturer_email: str
+    course_code: str
+    comment: str
+    created_at: str
+
+
+class DismissFlagRequest(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
 
 
 class SemesterOption(BaseModel):
@@ -252,6 +333,43 @@ def _parse_semester(value: str) -> Optional[Tuple[str, int]]:
         return None
 
 
+def _normalize_course_code(course_code: str) -> str:
+    return "".join(course_code.strip().upper().split())
+
+
+def _resolve_semester(semester: Optional[str]) -> Tuple[str, int, datetime, datetime]:
+    now = datetime.now(timezone.utc)
+    parsed = _parse_semester(semester) if semester else None
+    if semester and not parsed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid semester format. Use HARMATTAN-YYYY or RAIN-YYYY",
+        )
+    if parsed:
+        sem_type, sem_year = parsed
+    else:
+        sem_type, sem_year = _semester_from_date(now)
+    start, end = _semester_window(sem_type, sem_year)
+    return sem_type, sem_year, start, end
+
+
+def _pending_alerts_count(db: Session) -> int:
+    feedback_pending = (
+        db.query(func.count(Feedback.id))
+        .outerjoin(FeedbackFlagReview, FeedbackFlagReview.feedback_id == Feedback.id)
+        .filter(Feedback.is_flagged.is_(True), FeedbackFlagReview.id.is_(None))
+        .scalar()
+        or 0
+    )
+    rejected_pending = (
+        db.query(func.count(ToxicityRejectedAttempt.id))
+        .filter(ToxicityRejectedAttempt.is_reviewed.is_(False))
+        .scalar()
+        or 0
+    )
+    return int(feedback_pending) + int(rejected_pending)
+
+
 @app.post("/auth/register", response_model=RegisterResponse)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> RegisterResponse:
     if get_user_by_email(db, payload.email):
@@ -309,7 +427,24 @@ def submit_feedback(payload: FeedbackSubmitRequest, db: Session = Depends(get_db
             detail="Invalid or already used feedback token",
         )
 
-    enforce_toxicity_guard(payload.text)
+    if is_toxic_text(payload.text):
+        rejected_attempt = ToxicityRejectedAttempt(
+            token_id=token_record.id,
+            lecturer_id=token_record.lecturer_id,
+            course_code=token_record.course_code,
+            text=(payload.text or "").strip(),
+            reason="UNPROFESSIONAL_LANGUAGE",
+            is_reviewed=False,
+        )
+        db.add(rejected_attempt)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Please rephrase your comment using respectful language. "
+                "Focus on clear suggestions about teaching style, pace, or materials."
+            ),
+        )
 
     feedback = Feedback(
         lecturer_id=token_record.lecturer_id,
@@ -327,7 +462,11 @@ def submit_feedback(payload: FeedbackSubmitRequest, db: Session = Depends(get_db
     db.commit()
     db.refresh(feedback)
 
-    return FeedbackSubmitResponse(id=feedback.id, message="Feedback submitted")
+    return FeedbackSubmitResponse(
+        id=feedback.id,
+        message="Feedback submitted",
+        is_flagged=False,
+    )
 
 
 @app.get("/dashboard/admin", response_model=AdminDashboardResponse)
@@ -337,6 +476,15 @@ def admin_dashboard(
 ) -> AdminDashboardResponse:
     total_feedbacks = db.query(func.count(Feedback.id)).scalar() or 0
     avg_rating = db.query(func.avg(Feedback.rating)).scalar()
+    total_tokens = db.query(func.count(FeedbackToken.id)).scalar() or 0
+    used_tokens = (
+        db.query(func.count(FeedbackToken.id))
+        .filter(FeedbackToken.is_used.is_(True))
+        .scalar()
+        or 0
+    )
+    participation_rate = ((used_tokens / total_tokens) * 100.0) if total_tokens else 0.0
+    pending_alerts = _pending_alerts_count(db)
     flagged_count = (
         db.query(func.count(Feedback.id))
         .filter(Feedback.is_flagged.is_(True))
@@ -344,10 +492,37 @@ def admin_dashboard(
         or 0
     )
     toxicity_hit_rate = (flagged_count / total_feedbacks) if total_feedbacks else 0.0
+    global_average = float(avg_rating) if avg_rating is not None else None
+
+    cards = [
+        KPICard(key="total_feedbacks", label="Total Feedbacks", value=str(total_feedbacks), icon="Users"),
+        KPICard(
+            key="global_average",
+            label="Global Average",
+            value=f"{global_average:.2f}" if global_average is not None else "-",
+            icon="Star",
+        ),
+        KPICard(
+            key="participation_rate",
+            label="Participation Rate",
+            value=f"{participation_rate:.1f}%",
+            icon="Percent",
+        ),
+        KPICard(
+            key="pending_alerts",
+            label="Pending Alerts",
+            value=str(pending_alerts),
+            icon="AlertTriangle",
+        ),
+    ]
 
     return AdminDashboardResponse(
         total_feedbacks=total_feedbacks,
-        avg_rating=avg_rating,
+        global_average=global_average,
+        participation_rate=participation_rate,
+        pending_alerts=pending_alerts,
+        kpi_cards=cards,
+        avg_rating=global_average,
         toxicity_hit_rate=toxicity_hit_rate,
     )
 
@@ -364,6 +539,98 @@ def list_lecturers(
         .all()
     )
     return [LecturerOption(id=lecturer.id, email=lecturer.email) for lecturer in lecturers]
+
+
+@app.get("/dashboard/admin/kpis", response_model=AdminDashboardResponse)
+def admin_kpis(
+    user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> AdminDashboardResponse:
+    return admin_dashboard(_user=user, db=db)
+
+
+@app.get("/dashboard/admin/course-assignments", response_model=List[CourseAssignmentResponse])
+def list_course_assignments(
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> List[CourseAssignmentResponse]:
+    rows = (
+        db.query(CourseAssignment, User.email)
+        .join(User, User.id == CourseAssignment.lecturer_id)
+        .order_by(CourseAssignment.course_code.asc(), User.email.asc())
+        .all()
+    )
+    return [
+        CourseAssignmentResponse(
+            id=assignment.id,
+            lecturer_id=assignment.lecturer_id,
+            lecturer_email=email,
+            course_code=assignment.course_code,
+            created_at=assignment.created_at.isoformat(),
+        )
+        for assignment, email in rows
+    ]
+
+
+@app.post("/dashboard/admin/course-assignments", response_model=CourseAssignmentResponse)
+def create_course_assignment(
+    payload: CourseAssignmentCreateRequest,
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> CourseAssignmentResponse:
+    lecturer = db.query(User).filter(User.id == payload.lecturer_id).first()
+    if not lecturer or lecturer.role != UserRole.LECTURER:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid lecturer selected",
+        )
+
+    course_code = _normalize_course_code(payload.course_code)
+    existing = (
+        db.query(CourseAssignment)
+        .filter(
+            CourseAssignment.lecturer_id == payload.lecturer_id,
+            CourseAssignment.course_code == course_code,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Course is already assigned to this lecturer",
+        )
+
+    assignment = CourseAssignment(
+        lecturer_id=payload.lecturer_id,
+        course_code=course_code,
+    )
+    db.add(assignment)
+    db.commit()
+    db.refresh(assignment)
+    return CourseAssignmentResponse(
+        id=assignment.id,
+        lecturer_id=assignment.lecturer_id,
+        lecturer_email=lecturer.email,
+        course_code=assignment.course_code,
+        created_at=assignment.created_at.isoformat(),
+    )
+
+
+@app.delete("/dashboard/admin/course-assignments/{assignment_id}", response_model=ActionResponse)
+def delete_course_assignment(
+    assignment_id: int,
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> ActionResponse:
+    assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Course assignment not found",
+        )
+    db.delete(assignment)
+    db.commit()
+    return ActionResponse(message="Course assignment removed")
 
 
 def _generate_unique_token(db: Session) -> str:
@@ -387,7 +654,21 @@ def generate_tokens(
             detail="Invalid lecturer selected",
         )
 
-    course_code = payload.course_code.strip().upper()
+    course_code = _normalize_course_code(payload.course_code)
+    assignment = (
+        db.query(CourseAssignment)
+        .filter(
+            CourseAssignment.lecturer_id == payload.lecturer_id,
+            CourseAssignment.course_code == course_code,
+        )
+        .first()
+    )
+    if not assignment:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assign this course to the lecturer before generating tokens",
+        )
+
     tokens: List[str] = []
 
     for _ in range(payload.quantity):
@@ -410,12 +691,72 @@ def generate_tokens(
     )
 
 
+@app.get("/dashboard/admin/tokens", response_model=List[TokenListResponse])
+def list_tokens(
+    course_code: Optional[str] = None,
+    lecturer_id: Optional[int] = None,
+    semester: Optional[str] = None,
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> List[TokenListResponse]:
+    query = db.query(FeedbackToken, User.email).join(User, User.id == FeedbackToken.lecturer_id)
+    if course_code:
+        query = query.filter(FeedbackToken.course_code == _normalize_course_code(course_code))
+    if lecturer_id:
+        query = query.filter(FeedbackToken.lecturer_id == lecturer_id)
+    if semester:
+        _, _, start, end = _resolve_semester(semester)
+        query = query.filter(FeedbackToken.created_at >= start, FeedbackToken.created_at < end)
+
+    rows = query.order_by(FeedbackToken.created_at.desc()).all()
+    return [
+        TokenListResponse(
+            token=token.token,
+            course_code=token.course_code,
+            lecturer_id=token.lecturer_id,
+            lecturer_email=email,
+            is_used=token.is_used,
+            created_at=token.created_at.isoformat(),
+            used_at=token.used_at.isoformat() if token.used_at else None,
+        )
+        for token, email in rows
+    ]
+
+
+@app.get("/dashboard/admin/tokens/tracker", response_model=List[TokenTrackerResponse])
+def token_tracker(
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> List[TokenTrackerResponse]:
+    used_expr = case((FeedbackToken.is_used.is_(True), 1), else_=0)
+    rows = (
+        db.query(
+            FeedbackToken.course_code,
+            func.sum(used_expr).label("used_tokens"),
+            func.count(FeedbackToken.id).label("total_tokens"),
+        )
+        .group_by(FeedbackToken.course_code)
+        .order_by(FeedbackToken.course_code.asc())
+        .all()
+    )
+    return [
+        TokenTrackerResponse(
+            course_code=row.course_code,
+            used_tokens=int(row.used_tokens or 0),
+            total_tokens=int(row.total_tokens or 0),
+            usage_pct=((int(row.used_tokens or 0) / int(row.total_tokens or 1)) * 100.0),
+        )
+        for row in rows
+    ]
+
+
 @app.get("/dashboard/admin/ratings", response_model=List[LecturerRatingResponse])
 def admin_ratings(
+    search: Optional[str] = None,
     _user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> List[LecturerRatingResponse]:
-    rows = (
+    query = (
         db.query(
             User.email,
             func.coalesce(func.avg(Feedback.rating), 0).label("avg_rating"),
@@ -423,10 +764,11 @@ def admin_ratings(
         )
         .outerjoin(Feedback, Feedback.lecturer_id == User.id)
         .filter(User.role == UserRole.LECTURER)
-        .group_by(User.id, User.email)
-        .order_by(User.email.asc())
-        .all()
     )
+    if search:
+        query = query.filter(User.email.ilike(f"%{search.strip()}%"))
+
+    rows = query.group_by(User.id, User.email).order_by(User.email.asc()).all()
 
     return [
         LecturerRatingResponse(
@@ -438,20 +780,299 @@ def admin_ratings(
     ]
 
 
+@app.get("/dashboard/admin/leaderboard", response_model=List[LeaderboardEntry])
+def admin_leaderboard(
+    search: Optional[str] = None,
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> List[LeaderboardEntry]:
+    query = (
+        db.query(
+            User.id.label("lecturer_id"),
+            User.email.label("lecturer"),
+            func.coalesce(func.avg(Feedback.rating), 0).label("avg_rating"),
+            func.count(Feedback.id).label("total_feedbacks"),
+        )
+        .outerjoin(Feedback, Feedback.lecturer_id == User.id)
+        .filter(User.role == UserRole.LECTURER)
+    )
+    if search:
+        query = query.filter(User.email.ilike(f"%{search.strip()}%"))
+
+    rows = (
+        query.group_by(User.id, User.email)
+        .order_by(
+            func.coalesce(func.avg(Feedback.rating), 0).desc(),
+            func.count(Feedback.id).desc(),
+            User.email.asc(),
+        )
+        .all()
+    )
+
+    return [
+        LeaderboardEntry(
+            rank=index,
+            lecturer_id=row.lecturer_id,
+            lecturer=row.lecturer,
+            avg_rating=float(row.avg_rating or 0),
+            total_feedbacks=int(row.total_feedbacks or 0),
+        )
+        for index, row in enumerate(rows, start=1)
+    ]
+
+
 @app.get("/dashboard/admin/toxicity-log", response_model=List[ToxicityLogEntry])
 def admin_toxicity_log(
     _user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> List[ToxicityLogEntry]:
-    flagged_count = (
-        db.query(func.count(Feedback.id))
-        .filter(Feedback.is_flagged.is_(True))
-        .scalar()
-        or 0
-    )
+    flagged_count = _pending_alerts_count(db)
     if not flagged_count:
         return []
     return [ToxicityLogEntry(keyword="flagged", count=flagged_count, last_seen=None)]
+
+
+@app.get("/dashboard/admin/toxicity-feed", response_model=List[ToxicityFeedEntry])
+def toxicity_feed(
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> List[ToxicityFeedEntry]:
+    feedback_rows = (
+        db.query(Feedback, User.email)
+        .join(User, User.id == Feedback.lecturer_id)
+        .outerjoin(FeedbackFlagReview, FeedbackFlagReview.feedback_id == Feedback.id)
+        .filter(Feedback.is_flagged.is_(True), FeedbackFlagReview.id.is_(None))
+        .order_by(Feedback.created_at.desc())
+        .all()
+    )
+    feedback_items = [
+        ToxicityFeedEntry(
+            item_type="feedback",
+            item_id=feedback.id,
+            lecturer_id=feedback.lecturer_id,
+            lecturer_email=email,
+            course_code=feedback.course_code,
+            comment=(feedback.text or "").strip(),
+            created_at=feedback.created_at.isoformat(),
+        )
+        for feedback, email in feedback_rows
+    ]
+    rejected_rows = (
+        db.query(ToxicityRejectedAttempt, User.email)
+        .join(User, User.id == ToxicityRejectedAttempt.lecturer_id)
+        .filter(ToxicityRejectedAttempt.is_reviewed.is_(False))
+        .order_by(ToxicityRejectedAttempt.created_at.desc())
+        .all()
+    )
+    rejected_items = [
+        ToxicityFeedEntry(
+            item_type="rejected_attempt",
+            item_id=attempt.id,
+            lecturer_id=attempt.lecturer_id,
+            lecturer_email=email,
+            course_code=attempt.course_code,
+            comment=(attempt.text or "").strip(),
+            created_at=attempt.created_at.isoformat(),
+        )
+        for attempt, email in rejected_rows
+    ]
+
+    merged = feedback_items + rejected_items
+    merged.sort(key=lambda entry: entry.created_at, reverse=True)
+    return merged
+
+
+@app.post(
+    "/dashboard/admin/toxicity-feed/{feedback_id}/dismiss",
+    response_model=ActionResponse,
+)
+def dismiss_toxicity_flag(
+    feedback_id: int,
+    payload: Optional[DismissFlagRequest] = None,
+    user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> ActionResponse:
+    feedback = db.query(Feedback).filter(Feedback.id == feedback_id).first()
+    if not feedback:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Feedback item not found",
+        )
+    if not feedback.is_flagged:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Feedback is not currently flagged",
+        )
+    existing = (
+        db.query(FeedbackFlagReview)
+        .filter(FeedbackFlagReview.feedback_id == feedback.id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Feedback flag has already been reviewed",
+        )
+
+    review = FeedbackFlagReview(
+        feedback_id=feedback.id,
+        reviewed_by=user.id,
+        action=FlagReviewAction.DISMISSED,
+        note=payload.note.strip() if payload and payload.note else None,
+    )
+    feedback.is_flagged = False
+    db.add(review)
+    db.commit()
+    return ActionResponse(message="Flag dismissed")
+
+
+@app.post(
+    "/dashboard/admin/toxicity-feed/rejected-attempts/{attempt_id}/dismiss",
+    response_model=ActionResponse,
+)
+def dismiss_rejected_attempt(
+    attempt_id: int,
+    payload: Optional[DismissFlagRequest] = None,
+    user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> ActionResponse:
+    attempt = (
+        db.query(ToxicityRejectedAttempt)
+        .filter(ToxicityRejectedAttempt.id == attempt_id)
+        .first()
+    )
+    if not attempt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rejected attempt not found",
+        )
+    if attempt.is_reviewed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Rejected attempt has already been reviewed",
+        )
+
+    attempt.is_reviewed = True
+    attempt.reviewed_at = datetime.now(timezone.utc)
+    attempt.reviewed_by = user.id
+    attempt.review_note = payload.note.strip() if payload and payload.note else None
+    db.commit()
+    return ActionResponse(message="Rejected attempt dismissed")
+
+
+@app.get("/dashboard/admin/export/semester-summary")
+def export_semester_summary(
+    semester: Optional[str] = None,
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    sem_type, sem_year, start, end = _resolve_semester(semester)
+    sem_label = _semester_label(sem_type, sem_year)
+    sem_range = _semester_range_label(start, end)
+
+    rows = (
+        db.query(
+            User.id.label("lecturer_id"),
+            User.email.label("lecturer"),
+            func.avg(Feedback.rating).label("avg_rating"),
+            func.count(Feedback.id).label("total_feedbacks"),
+        )
+        .outerjoin(
+            Feedback,
+            (Feedback.lecturer_id == User.id)
+            & (Feedback.created_at >= start)
+            & (Feedback.created_at < end),
+        )
+        .filter(User.role == UserRole.LECTURER)
+        .group_by(User.id, User.email)
+        .order_by(User.email.asc())
+        .all()
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "semester",
+            "range",
+            "lecturer_id",
+            "lecturer_email",
+            "average_rating",
+            "feedback_count",
+        ]
+    )
+    for row in rows:
+        writer.writerow(
+            [
+                sem_label,
+                sem_range,
+                row.lecturer_id,
+                row.lecturer,
+                f"{float(row.avg_rating):.2f}" if row.avg_rating is not None else "",
+                int(row.total_feedbacks or 0),
+            ]
+        )
+
+    payload = output.getvalue()
+    filename = f"semester-summary-{_semester_value(sem_type, sem_year).lower()}.csv"
+    return StreamingResponse(
+        iter([payload]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/dashboard/admin/export/token-list")
+def export_token_list(
+    course_code: Optional[str] = None,
+    lecturer_id: Optional[int] = None,
+    semester: Optional[str] = None,
+    _user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    query = db.query(FeedbackToken, User.email).join(User, User.id == FeedbackToken.lecturer_id)
+    if course_code:
+        query = query.filter(FeedbackToken.course_code == _normalize_course_code(course_code))
+    if lecturer_id:
+        query = query.filter(FeedbackToken.lecturer_id == lecturer_id)
+    if semester:
+        _, _, start, end = _resolve_semester(semester)
+        query = query.filter(FeedbackToken.created_at >= start, FeedbackToken.created_at < end)
+
+    rows = query.order_by(FeedbackToken.created_at.desc()).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "token",
+            "course_code",
+            "lecturer_id",
+            "lecturer_email",
+            "is_used",
+            "created_at",
+            "used_at",
+        ]
+    )
+    for token, email in rows:
+        writer.writerow(
+            [
+                token.token,
+                token.course_code,
+                token.lecturer_id,
+                email,
+                "yes" if token.is_used else "no",
+                token.created_at.isoformat(),
+                token.used_at.isoformat() if token.used_at else "",
+            ]
+        )
+
+    payload = output.getvalue()
+    return StreamingResponse(
+        iter([payload]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="token-list.csv"'},
+    )
 
 
 @app.get("/dashboard/lecturer", response_model=LecturerDashboardResponse)
@@ -463,7 +1084,7 @@ def lecturer_dashboard(
 ) -> LecturerDashboardResponse:
     now = datetime.now(timezone.utc)
     base_query = db.query(Feedback).filter(Feedback.lecturer_id == user.id)
-    normalized_course = course_code.strip().upper() if course_code else None
+    normalized_course = _normalize_course_code(course_code) if course_code else None
     scoped_query = base_query
     if normalized_course:
         scoped_query = scoped_query.filter(Feedback.course_code == normalized_course)
@@ -488,7 +1109,22 @@ def lecturer_dashboard(
         for row in breakdown_rows
         if row.course_code
     ]
-    available_courses = [item.course_code for item in course_breakdown]
+    assigned_courses = [
+        row[0]
+        for row in db.query(CourseAssignment.course_code)
+        .filter(CourseAssignment.lecturer_id == user.id)
+        .order_by(CourseAssignment.course_code.asc())
+        .all()
+    ]
+    seen_courses = {item.course_code for item in course_breakdown}
+    for code in assigned_courses:
+        if code not in seen_courses:
+            course_breakdown.append(
+                CourseBreakdown(course_code=code, avg_rating=None, count=0)
+            )
+            seen_courses.add(code)
+    course_breakdown.sort(key=lambda item: item.course_code)
+    available_courses = sorted(seen_courses)
 
     min_created = (
         scoped_query.with_entities(func.min(Feedback.created_at)).scalar()

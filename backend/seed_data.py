@@ -2,11 +2,54 @@ from __future__ import annotations
 
 import argparse
 import random
+import secrets
 from datetime import datetime, timedelta, timezone
 
-from database import SessionLocal
-from models import Feedback, User, UserRole
+from passlib.context import CryptContext
 from sqlalchemy.orm import Session
+
+from database import Base, SessionLocal, engine
+from models import (
+    CourseAssignment,
+    Feedback,
+    FeedbackFlagReview,
+    FeedbackToken,
+    FlagReviewAction,
+    ToxicityRejectedAttempt,
+    User,
+    UserRole,
+)
+
+
+pwd_context = CryptContext(schemes=["bcrypt", "pbkdf2_sha256"], deprecated="auto")
+
+DEMO_ADMIN_EMAIL = "admin.demo@feedback.com"
+DEMO_ADMIN_PASSWORD = "admin1234"
+
+DEMO_LECTURERS = [
+    ("ada.obi@feedback.com", ["CSC401", "CSC405"]),
+    ("sam.okafor@feedback.com", ["GST111", "MTH201"]),
+    ("zainab.sani@feedback.com", ["PHY101", "CHM102"]),
+]
+
+POSITIVE_COMMENTS = [
+    "Very clear explanation and practical examples.",
+    "Excellent course delivery and helpful office hours.",
+    "Good pacing and quality materials.",
+]
+NEUTRAL_COMMENTS = [
+    "The class is okay but could be more interactive.",
+    "Average delivery; slides were useful though.",
+]
+NEGATIVE_COMMENTS = [
+    "Lectures felt rushed and difficult to follow.",
+    "Needs better structure and clearer expectations.",
+]
+TOXIC_COMMENTS = [
+    "This lecture was damn annoying.",
+    "The class was stupid and useless.",
+    "Worst lecturer ever, nonsense delivery.",
+]
 
 
 def _random_date(start: datetime, end: datetime) -> datetime:
@@ -16,110 +59,237 @@ def _random_date(start: datetime, end: datetime) -> datetime:
     return start + timedelta(days=random.randint(0, delta.days - 1))
 
 
-def _choose_lecturer(db: Session, email: str | None) -> User | None:
-    query = db.query(User).filter(User.role == UserRole.LECTURER)
-    if email:
-        query = query.filter(User.email == email.lower())
-    return query.first()
+def _ensure_user(db: Session, email: str, role: UserRole, password: str) -> User:
+    normalized = email.strip().lower()
+    user = db.query(User).filter(User.email == normalized).first()
+    if user:
+        if user.role != role:
+            user.role = role
+            db.flush()
+        return user
+
+    user = User(
+        email=normalized,
+        hashed_password=pwd_context.hash(password),
+        role=role,
+    )
+    db.add(user)
+    db.flush()
+    return user
 
 
-def seed(email: str | None) -> None:
+def _clear_demo_data(db: Session, lecturer_ids: list[int]) -> None:
+    if not lecturer_ids:
+        return
+
+    feedback_ids = [
+        item[0]
+        for item in db.query(Feedback.id)
+        .filter(Feedback.lecturer_id.in_(lecturer_ids))
+        .all()
+    ]
+    if feedback_ids:
+        db.query(FeedbackFlagReview).filter(
+            FeedbackFlagReview.feedback_id.in_(feedback_ids)
+        ).delete(synchronize_session=False)
+
+    db.query(Feedback).filter(Feedback.lecturer_id.in_(lecturer_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(ToxicityRejectedAttempt).filter(
+        ToxicityRejectedAttempt.lecturer_id.in_(lecturer_ids)
+    ).delete(synchronize_session=False)
+    db.query(FeedbackToken).filter(FeedbackToken.lecturer_id.in_(lecturer_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(CourseAssignment).filter(
+        CourseAssignment.lecturer_id.in_(lecturer_ids)
+    ).delete(synchronize_session=False)
+
+
+def _seed_for_assignment(
+    db: Session,
+    lecturer_id: int,
+    course_code: str,
+    previous_start: datetime,
+    previous_end: datetime,
+    current_start: datetime,
+    current_end: datetime,
+) -> tuple[int, int, int, int]:
+    total_tokens = random.randint(24, 34)
+    used_tokens = int(total_tokens * random.uniform(0.55, 0.82))
+    pending_flagged = 0
+    dismissed_flags = 0
+
+    tokens: list[FeedbackToken] = []
+    for _ in range(total_tokens):
+        token = FeedbackToken(
+            token=f"demo-{course_code.lower()}-{secrets.token_urlsafe(10)}",
+            lecturer_id=lecturer_id,
+            course_code=course_code,
+            is_used=False,
+            created_at=_random_date(previous_start, current_end),
+        )
+        db.add(token)
+        tokens.append(token)
+    db.flush()
+
+    selected_tokens = random.sample(tokens, used_tokens)
+    for index, token in enumerate(selected_tokens):
+        in_current = index % 3 != 0
+        created_at = (
+            _random_date(current_start, current_end)
+            if in_current
+            else _random_date(previous_start, previous_end)
+        )
+
+        sentiment_roll = random.random()
+        if sentiment_roll < 0.58:
+            rating = random.choice([4, 5])
+            text = random.choice(POSITIVE_COMMENTS)
+            is_flagged = False
+        elif sentiment_roll < 0.88:
+            rating = random.choice([3, 4])
+            text = random.choice(NEUTRAL_COMMENTS)
+            is_flagged = False
+        else:
+            rating = random.choice([1, 2])
+            text = random.choice(NEGATIVE_COMMENTS)
+            is_flagged = False
+
+        if index % 11 == 0:
+            text = random.choice(TOXIC_COMMENTS)
+            is_flagged = True
+
+        feedback = Feedback(
+            lecturer_id=lecturer_id,
+            token_id=token.id,
+            course_code=course_code,
+            rating=rating,
+            text=text,
+            sentiment_score=float(rating) / 5.0,
+            is_flagged=is_flagged,
+            created_at=created_at,
+        )
+        db.add(feedback)
+        db.flush()
+
+        token.is_used = True
+        token.used_at = created_at
+
+        if is_flagged and index % 22 == 0:
+            feedback.is_flagged = False
+            review = FeedbackFlagReview(
+                feedback_id=feedback.id,
+                reviewed_by=lecturer_id,
+                action=FlagReviewAction.DISMISSED,
+                note="Demo dismissed for false positive",
+                reviewed_at=created_at + timedelta(minutes=20),
+            )
+            db.add(review)
+            dismissed_flags += 1
+        elif is_flagged:
+            pending_flagged += 1
+
+    return total_tokens, used_tokens, pending_flagged, dismissed_flags
+
+
+def seed(clear_existing: bool) -> None:
+    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        lecturer = _choose_lecturer(db, email)
-        if not lecturer:
-            print("ERROR: Lecturer not found. Register a lecturer or pass --email.")
-            return
-
-        db.query(Feedback).filter(Feedback.lecturer_id == lecturer.id).delete()
-        db.commit()
-
         previous_start = datetime(2025, 4, 1, tzinfo=timezone.utc)
         previous_end = datetime(2025, 10, 1, tzinfo=timezone.utc)
         current_start = datetime(2025, 10, 1, tzinfo=timezone.utc)
         current_end = datetime(2026, 4, 1, tzinfo=timezone.utc)
 
-        csc_comments = [
-            "Great practical examples used in class.",
-            "The lecturer explains difficult ideas clearly.",
-            "Very organized and approachable.",
-            "Strong delivery and useful assignments.",
-        ]
-        gst_comments = [
-            "Class is okay but needs better structure.",
-            "Some topics were rushed and unclear.",
-            "Average teaching, could be more engaging.",
-            "Needs better pacing in lecture sessions.",
-        ]
+        admin = _ensure_user(
+            db,
+            email=DEMO_ADMIN_EMAIL,
+            role=UserRole.ADMIN,
+            password=DEMO_ADMIN_PASSWORD,
+        )
 
-        # Previous semester (Rain 2025): create baseline for delta.
-        for _ in range(10):
-            db.add(
-                Feedback(
-                    lecturer_id=lecturer.id,
-                    course_code="CSC401",
-                    rating=random.choice([3, 3, 4, 4, 4]),
-                    text=random.choice(csc_comments),
-                    sentiment_score=random.uniform(0.55, 0.8),
-                    is_flagged=False,
-                    created_at=_random_date(previous_start, previous_end),
+        lecturer_users: list[User] = []
+        for lecturer_email, _ in DEMO_LECTURERS:
+            lecturer_users.append(
+                _ensure_user(
+                    db,
+                    email=lecturer_email,
+                    role=UserRole.LECTURER,
+                    password="lecturer1234",
                 )
             )
+        db.flush()
 
-        for _ in range(5):
-            db.add(
-                Feedback(
-                    lecturer_id=lecturer.id,
-                    course_code="GST111",
-                    rating=random.choice([2, 2, 3, 3, 3]),
-                    text=random.choice(gst_comments),
-                    sentiment_score=random.uniform(0.3, 0.55),
-                    is_flagged=False,
-                    created_at=_random_date(previous_start, previous_end),
-                )
-            )
+        lecturer_id_by_email = {user.email: user.id for user in lecturer_users}
+        lecturer_ids = [user.id for user in lecturer_users]
 
-        # Current semester (Harmattan 2025/2026): main presentation contrast.
-        for _ in range(20):
-            db.add(
-                Feedback(
-                    lecturer_id=lecturer.id,
-                    course_code="CSC401",
-                    rating=random.choice([4, 4, 5, 5, 5]),
-                    text=random.choice(csc_comments),
-                    sentiment_score=random.uniform(0.75, 0.98),
-                    is_flagged=False,
-                    created_at=_random_date(current_start, current_end),
-                )
-            )
+        if clear_existing:
+            _clear_demo_data(db, lecturer_ids)
 
-        for _ in range(10):
-            db.add(
-                Feedback(
-                    lecturer_id=lecturer.id,
-                    course_code="GST111",
-                    rating=random.choice([2, 2, 3, 3, 3]),
-                    text=random.choice(gst_comments),
-                    sentiment_score=random.uniform(0.25, 0.6),
-                    is_flagged=False,
-                    created_at=_random_date(current_start, current_end),
+        total_assignments = 0
+        total_tokens = 0
+        total_used = 0
+        total_pending = 0
+        total_dismissed = 0
+
+        for lecturer_email, courses in DEMO_LECTURERS:
+            lecturer_id = lecturer_id_by_email[lecturer_email]
+            for course_code in courses:
+                assignment = CourseAssignment(
+                    lecturer_id=lecturer_id,
+                    course_code=course_code,
+                    created_at=_random_date(previous_start, current_start),
                 )
-            )
+                db.add(assignment)
+                total_assignments += 1
+
+                (
+                    assignment_tokens,
+                    assignment_used,
+                    assignment_pending,
+                    assignment_dismissed,
+                ) = _seed_for_assignment(
+                    db=db,
+                    lecturer_id=lecturer_id,
+                    course_code=course_code,
+                    previous_start=previous_start,
+                    previous_end=previous_end,
+                    current_start=current_start,
+                    current_end=current_end,
+                )
+                total_tokens += assignment_tokens
+                total_used += assignment_used
+                total_pending += assignment_pending
+                total_dismissed += assignment_dismissed
 
         db.commit()
-        print("Seed complete:")
-        print("Rain 2025 -> CSC401=10, GST111=5")
-        print("Harmattan 2025/2026 -> CSC401=20, GST111=10")
-        print(f"Lecturer: {lecturer.email}")
+        participation = (total_used / total_tokens * 100.0) if total_tokens else 0.0
+
+        print("Admin dashboard demo seed complete.")
+        print(f"Admin login: {admin.email} / {DEMO_ADMIN_PASSWORD}")
+        print(f"Lecturers seeded: {len(lecturer_users)}")
+        print(f"Course assignments: {total_assignments}")
+        print(f"Tokens: used {total_used} / total {total_tokens} ({participation:.1f}%)")
+        print(f"Pending flagged comments: {total_pending}")
+        print(f"Dismissed flagged comments: {total_dismissed}")
+        print("Semesters covered: Rain 2025 and Harmattan 2025/2026")
     finally:
         db.close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Seed lecturer feedback data by course.")
-    parser.add_argument("--email", help="Lecturer email to seed")
+    parser = argparse.ArgumentParser(
+        description="Seed demo data for the admin dashboard."
+    )
+    parser.add_argument(
+        "--no-clear",
+        action="store_true",
+        help="Do not clear prior demo records for demo lecturers before seeding.",
+    )
     args = parser.parse_args()
-    seed(args.email)
+    seed(clear_existing=not args.no_clear)
 
 
 if __name__ == "__main__":

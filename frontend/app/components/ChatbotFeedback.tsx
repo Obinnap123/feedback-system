@@ -2,9 +2,67 @@
 
 import { useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { Star } from "lucide-react";
 import { submitFeedback } from "../lib/api";
 
 const STAR_RANGE = [1, 2, 3, 4, 5];
+const QUICK_QUESTIONS = [
+  {
+    id: "clarity",
+    prompt: "How clear was the lecturer's explanation?",
+    options: ["Very clear", "Somewhat clear", "Not clear"],
+  },
+  {
+    id: "pace",
+    prompt: "How was the lecture pace?",
+    options: ["Too fast", "Balanced", "Too slow"],
+  },
+  {
+    id: "engagement",
+    prompt: "How engaging was the lecture?",
+    options: ["Very engaging", "Average", "Not engaging"],
+  },
+  {
+    id: "materials",
+    prompt: "How useful were examples/materials?",
+    options: ["Very useful", "Somewhat useful", "Not useful"],
+  },
+  {
+    id: "confidence",
+    prompt: "How confident do you feel after this class?",
+    options: ["Very confident", "Somewhat confident", "Not confident"],
+  },
+];
+const FEEDBACK_GUIDELINES = [
+  "Focus on teaching quality, clarity, pace, and course materials.",
+  "Use respectful language. Avoid insults, abuse, or personal attacks.",
+  "Give specific examples so the lecturer can improve quickly.",
+];
+
+const formatDetail = (detail: unknown): string | null => {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "msg" in item) {
+          const maybeMsg = (item as { msg?: unknown }).msg;
+          return typeof maybeMsg === "string" ? maybeMsg : null;
+        }
+        return null;
+      })
+      .filter((item): item is string => Boolean(item));
+    return messages.length ? messages.join("; ") : null;
+  }
+  if (detail && typeof detail === "object") {
+    if ("msg" in detail) {
+      const maybeMsg = (detail as { msg?: unknown }).msg;
+      if (typeof maybeMsg === "string") return maybeMsg;
+    }
+    return JSON.stringify(detail);
+  }
+  return null;
+};
 
 function getErrorMessage(error: unknown): string {
   if (!error || typeof error !== "object") {
@@ -12,13 +70,15 @@ function getErrorMessage(error: unknown): string {
   }
 
   const maybeAny = error as {
-    response?: { data?: { detail?: string; error?: string } };
+    response?: { data?: { detail?: unknown; error?: unknown } };
     message?: string;
   };
+  const detailMessage = formatDetail(maybeAny.response?.data?.detail);
+  const errorMessage = formatDetail(maybeAny.response?.data?.error);
 
   return (
-    maybeAny.response?.data?.detail ||
-    maybeAny.response?.data?.error ||
+    detailMessage ||
+    errorMessage ||
     maybeAny.message ||
     "Something went wrong. Please try again."
   );
@@ -38,6 +98,7 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
   const [token, setToken] = useState(tokenFromQuery);
   const [rating, setRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
+  const [quickAnswers, setQuickAnswers] = useState<Record<string, string>>({});
   const [text, setText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -45,12 +106,17 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
 
   const showToast = (message: string) => {
     setToast(message);
-    window.setTimeout(() => setToast(null), 3200);
+    window.setTimeout(() => setToast(null), 3600);
   };
 
   const handleRatingSelect = (value: number) => {
     if (submitted) return;
     setRating(value);
+  };
+
+  const selectQuickAnswer = (questionId: string, option: string) => {
+    if (submitted) return;
+    setQuickAnswers((prev) => ({ ...prev, [questionId]: option }));
   };
 
   const handleSubmit = async () => {
@@ -66,23 +132,40 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
       return;
     }
 
+    if (Object.keys(quickAnswers).length < QUICK_QUESTIONS.length) {
+      showToast("Please answer all 5 quick questions before submitting.");
+      return;
+    }
+
     if (!text.trim()) {
-      showToast("Please add a short comment before submitting.");
+      showToast("Please answer the guided questions and write your final comment.");
+      return;
+    }
+
+    if (text.trim().length < 20) {
+      showToast("Please provide at least 20 characters so your feedback is useful.");
       return;
     }
 
     setIsSubmitting(true);
     try {
+      const quickSummary = QUICK_QUESTIONS.map(
+        (question) => `${question.prompt}: ${quickAnswers[question.id] || "-"}`,
+      ).join(" | ");
+      const combinedText = `Quick responses: ${quickSummary}\nStudent comment: ${text.trim()}`;
+
       await submitFeedback({
         token: token.trim(),
         rating,
-        text: text.trim(),
+        text: combinedText,
       });
       setSubmitted(true);
     } catch (error) {
       const message = getErrorMessage(error);
-      if (/toxic|toxicity|unprofessional|professional/i.test(message)) {
-        showToast("Please keep it professional!");
+      if (/toxic|toxicity|unprofessional|professional|rephrase|respectful/i.test(message)) {
+        showToast(
+          "Please rephrase using respectful language. Focus on teaching style, pace, or course materials.",
+        );
       } else {
         showToast(message);
       }
@@ -110,8 +193,8 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
       <div
         className={
           embedded
-            ? "flex w-full flex-col gap-6 px-6 py-10"
-            : "mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 py-14"
+            ? "flex w-full flex-col gap-6 px-4 py-8 sm:px-6 sm:py-10"
+            : "mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8 sm:px-6 sm:py-14"
         }
       >
         <header className="space-y-2">
@@ -122,11 +205,11 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
             Share your thoughts in a quick chat.
           </h1>
           <p className="text-sm text-slate-400">
-            {stepLabel} · Your feedback is anonymous to classmates.
+            {stepLabel} - Your feedback is anonymous to classmates.
           </p>
         </header>
 
-        <section className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-6 shadow-2xl shadow-slate-950/60 backdrop-blur">
+        <section className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-4 shadow-2xl shadow-slate-950/60 backdrop-blur sm:p-6">
           <div className="rounded-2xl border border-slate-800/70 bg-slate-950/40 p-4">
             <label className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
               Feedback Token
@@ -163,7 +246,7 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
                       onFocus={() => setHoverRating(star)}
                       onBlur={() => setHoverRating(0)}
                       onClick={() => handleRatingSelect(star)}
-                      className={`flex h-10 w-10 items-center justify-center rounded-full border text-lg transition ${
+                      className={`flex h-10 w-10 items-center justify-center rounded-full border transition ${
                         isActive
                           ? "border-amber-400 bg-amber-400/20 text-amber-300"
                           : "border-slate-700/80 bg-slate-900/40 text-slate-500 hover:border-amber-300/60 hover:text-amber-300"
@@ -172,13 +255,13 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
                       aria-pressed={rating === star}
                       disabled={submitted}
                     >
-                      ★
+                      <Star className={`h-4 w-4 ${isActive ? "fill-current" : ""}`} />
                     </button>
                   );
                 })}
               </div>
               <span className="text-xs text-slate-400">
-                Select 1–5 stars (hover to preview).
+                Select 1-5 stars (hover to preview).
               </span>
             </div>
 
@@ -198,14 +281,59 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
                     Bot
                   </div>
                   <div className="rounded-2xl bg-slate-800/70 px-4 py-3 text-sm text-slate-100">
-                    Tell us what worked well and what could be improved.
+                    Please answer these 5 quick questions, then write one final comment.
                   </div>
                 </div>
 
                 <div className="ml-12 space-y-3">
+                  <div className="space-y-2 rounded-2xl border border-slate-800/70 bg-slate-950/50 p-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                      Quick Questions ({Object.keys(quickAnswers).length}/{QUICK_QUESTIONS.length})
+                    </p>
+                    {QUICK_QUESTIONS.map((question, index) => (
+                      <div
+                        key={question.id}
+                        className="rounded-xl border border-slate-800/70 bg-slate-950/60 p-3"
+                      >
+                        <p className="text-sm text-slate-200">
+                          {index + 1}. {question.prompt}
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {question.options.map((option) => {
+                            const selected = quickAnswers[question.id] === option;
+                            return (
+                              <button
+                                key={option}
+                                type="button"
+                                onClick={() => selectQuickAnswer(question.id, option)}
+                                disabled={submitted}
+                                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                                  selected
+                                    ? "border-indigo-300 bg-indigo-500/30 text-indigo-100"
+                                    : "border-indigo-400/40 text-indigo-200 hover:bg-indigo-500/20"
+                                }`}
+                              >
+                                {option}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-2xl border border-slate-800/70 bg-slate-950/50 p-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                      Feedback Guidelines
+                    </p>
+                    <ul className="mt-2 space-y-1 text-xs text-slate-300">
+                      {FEEDBACK_GUIDELINES.map((rule) => (
+                        <li key={rule}>- {rule}</li>
+                      ))}
+                    </ul>
+                  </div>
                   <textarea
-                    className="min-h-35 w-full resize-none rounded-2xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
-                    placeholder="Write your feedback here..."
+                    className="min-h-36 w-full resize-none rounded-2xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
+                    placeholder="In 2-4 sentences, what should the lecturer keep doing and what should improve?"
                     value={text}
                     onChange={(event) => setText(event.target.value)}
                     disabled={submitted}
@@ -242,7 +370,7 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
       </div>
 
       {toast && (
-        <div className="fixed right-6 top-6 z-50 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-lg shadow-red-500/20 backdrop-blur">
+        <div className="fixed right-3 top-3 z-50 max-w-[min(92vw,30rem)] rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-lg shadow-red-500/20 backdrop-blur sm:right-6 sm:top-6">
           {toast}
         </div>
       )}

@@ -4,19 +4,46 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { loginUser } from "../lib/api";
 
+const formatDetail = (detail: unknown): string | null => {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "msg" in item) {
+          const maybeMsg = (item as { msg?: unknown }).msg;
+          return typeof maybeMsg === "string" ? maybeMsg : null;
+        }
+        return null;
+      })
+      .filter((item): item is string => Boolean(item));
+    return messages.length ? messages.join("; ") : null;
+  }
+  if (detail && typeof detail === "object") {
+    if ("msg" in detail) {
+      const maybeMsg = (detail as { msg?: unknown }).msg;
+      if (typeof maybeMsg === "string") return maybeMsg;
+    }
+    return JSON.stringify(detail);
+  }
+  return null;
+};
+
 const getErrorMessage = (error: unknown): string => {
   if (!error || typeof error !== "object") {
     return "Unable to log in.";
   }
 
   const maybeAny = error as {
-    response?: { data?: { detail?: string; error?: string } };
+    response?: { data?: { detail?: unknown; error?: unknown } };
     message?: string;
   };
+  const detailMessage = formatDetail(maybeAny.response?.data?.detail);
+  const errorMessage = formatDetail(maybeAny.response?.data?.error);
 
   return (
-    maybeAny.response?.data?.detail ||
-    maybeAny.response?.data?.error ||
+    detailMessage ||
+    errorMessage ||
     maybeAny.message ||
     "Unable to log in."
   );

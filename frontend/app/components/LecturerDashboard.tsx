@@ -487,16 +487,17 @@ export default function LecturerDashboard({
               </h2>
             </div>
           </div>
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-sm text-slate-200">
-              <thead>
+          <div className="mt-4 overflow-hidden rounded-xl border border-slate-800/70 bg-slate-950/40">
+            <div className="max-h-72 overflow-auto">
+              <table className="w-full min-w-[460px] text-sm text-slate-200">
+                <thead className="sticky top-0 z-10 bg-slate-950/95 backdrop-blur">
                 <tr className="text-left text-slate-400">
                   <th className="pb-2">Course</th>
                   <th className="pb-2">Avg Rating</th>
                   <th className="pb-2">Feedback Count</th>
                 </tr>
-              </thead>
-              <tbody>
+                </thead>
+                <tbody>
                 {(metrics?.course_breakdown || []).map((row) => (
                   <tr key={row.course_code} className="border-t border-slate-800/70">
                     <td className="py-2">{row.course_code}</td>
@@ -504,8 +505,9 @@ export default function LecturerDashboard({
                     <td className="py-2">{row.count}</td>
                   </tr>
                 ))}
-              </tbody>
-            </table>
+                </tbody>
+              </table>
+            </div>
             {!(metrics?.course_breakdown || []).length && (
               <p className="pt-3 text-sm text-slate-500">No course data yet.</p>
             )}

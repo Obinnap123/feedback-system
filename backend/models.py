@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import enum
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -13,6 +24,10 @@ class UserRole(str, enum.Enum):
     STUDENT = "STUDENT"
     LECTURER = "LECTURER"
     ADMIN = "ADMIN"
+
+
+class FlagReviewAction(str, enum.Enum):
+    DISMISSED = "DISMISSED"
 
 
 class User(Base):
@@ -30,6 +45,12 @@ class User(Base):
     )
     feedback_tokens = relationship(
         "FeedbackToken", back_populates="lecturer", foreign_keys="FeedbackToken.lecturer_id"
+    )
+    course_assignments = relationship(
+        "CourseAssignment", back_populates="lecturer", foreign_keys="CourseAssignment.lecturer_id"
+    )
+    flag_reviews = relationship(
+        "FeedbackFlagReview", back_populates="reviewer", foreign_keys="FeedbackFlagReview.reviewed_by"
     )
 
 
@@ -58,6 +79,21 @@ class FeedbackToken(Base):
 
     lecturer = relationship("User", back_populates="feedback_tokens", foreign_keys=[lecturer_id])
     feedbacks = relationship("Feedback", back_populates="token")
+    rejected_attempts = relationship("ToxicityRejectedAttempt", back_populates="token")
+
+
+class CourseAssignment(Base):
+    __tablename__ = "course_assignments"
+    __table_args__ = (
+        UniqueConstraint("lecturer_id", "course_code", name="uq_course_assignments_lecturer_course"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    lecturer_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    course_code = Column(String(50), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    lecturer = relationship("User", back_populates="course_assignments", foreign_keys=[lecturer_id])
 
 
 class Feedback(Base):
@@ -75,3 +111,40 @@ class Feedback(Base):
 
     lecturer = relationship("User", back_populates="feedbacks_received", foreign_keys=[lecturer_id])
     token = relationship("FeedbackToken", back_populates="feedbacks")
+    flag_review = relationship("FeedbackFlagReview", back_populates="feedback", uselist=False)
+
+
+class FeedbackFlagReview(Base):
+    __tablename__ = "feedback_flag_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    feedback_id = Column(Integer, ForeignKey("feedback.id"), unique=True, nullable=False, index=True)
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    action = Column(
+        Enum(FlagReviewAction, name="flag_review_action"),
+        nullable=False,
+        default=FlagReviewAction.DISMISSED,
+    )
+    note = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    feedback = relationship("Feedback", back_populates="flag_review")
+    reviewer = relationship("User", back_populates="flag_reviews", foreign_keys=[reviewed_by])
+
+
+class ToxicityRejectedAttempt(Base):
+    __tablename__ = "toxicity_rejected_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token_id = Column(Integer, ForeignKey("feedback_tokens.id"), nullable=False, index=True)
+    lecturer_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    course_code = Column(String(50), nullable=False, index=True)
+    text = Column(Text, nullable=False)
+    reason = Column(String(100), nullable=False, default="UNPROFESSIONAL_LANGUAGE")
+    is_reviewed = Column(Boolean, nullable=False, default=False)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    review_note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    token = relationship("FeedbackToken", back_populates="rejected_attempts", foreign_keys=[token_id])
