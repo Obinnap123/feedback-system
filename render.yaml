@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: feedback-system-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://feedback-system-azure-kappa.vercel.app
+      - key: CORS_ALLOWED_ORIGIN_REGEX
+        value: ^https://.*\.vercel\.app$
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ANON_KEY_SECRET
+        generateValue: true

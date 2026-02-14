@@ -1,12 +1,20 @@
+import os
+
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# PASTE YOUR NEON CONNECTION STRING BELOW
-SQLALCHEMY_DATABASE_URL = "postgresql://neondb_owner:npg_btMRpO0g4Uml@ep-patient-rice-aimahe5x-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv(
+    "SQLALCHEMY_DATABASE_URL"
+)
+if not SQLALCHEMY_DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Configure DATABASE_URL in your environment "
+        "with your Neon PostgreSQL connection string."
+    )
 
-# Note: The 'sslmode=require' is vital for Neon
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+# Neon/PostgreSQL connection.
+engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
