@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
 import io
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 import secrets
+import json
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,25 +16,30 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from passlib.exc import UnknownHashError
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from database import Base, engine, get_db
 from models import (
+    AdminAuditLog,
     CourseAssignment,
     Feedback,
     FeedbackFlagReview,
     FeedbackToken,
     FlagReviewAction,
+    StudentSessionSubmission,
+    TokenSession,
     ToxicityRejectedAttempt,
     User,
     UserRole,
 )
-from utils import clean_feedback_text, is_toxic_text
+from utils import clean_feedback_text, toxicity_reason
 
 
 SECRET_KEY = "change-me"
+ANON_KEY_SECRET = "change-me-anon-key"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
@@ -53,19 +61,18 @@ Base.metadata.create_all(bind=engine)
 
 
 class RegisterRequest(BaseModel):
-    email: EmailStr
+    email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=6)
-    role: UserRole = UserRole.STUDENT
 
 
 class RegisterResponse(BaseModel):
     id: int
-    email: EmailStr
+    email: str
     role: UserRole
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str = Field(min_length=3, max_length=255)
     password: str
 
 
@@ -131,11 +138,15 @@ class TokenGenerateRequest(BaseModel):
     course_code: str = Field(min_length=2, max_length=50)
     lecturer_id: int
     quantity: int = Field(default=1, ge=1, le=500)
+    session_key: Optional[str] = Field(default=None, max_length=32)
+    session_label: Optional[str] = Field(default=None, max_length=120)
 
 
 class TokenGenerateResponse(BaseModel):
     course_code: str
     lecturer_id: int
+    session_key: str
+    session_label: str
     tokens: List[str]
 
 
@@ -151,9 +162,23 @@ class TokenListResponse(BaseModel):
     course_code: str
     lecturer_id: int
     lecturer_email: str
+    session_key: str
+    session_label: str
     is_used: bool
     created_at: str
     used_at: Optional[str]
+
+
+class TokenStatusResponse(BaseModel):
+    token: str
+    valid: bool
+    is_used: bool
+    can_submit: bool
+    course_code: Optional[str] = None
+    lecturer_email: Optional[str] = None
+    session_key: Optional[str] = None
+    session_label: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class LecturerRatingResponse(BaseModel):
@@ -238,7 +263,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    return db.query(User).filter(User.email == email).first()
+    return db.query(User).filter(User.email == email.strip().lower()).first()
 
 
 def get_current_user(
@@ -337,6 +362,82 @@ def _normalize_course_code(course_code: str) -> str:
     return "".join(course_code.strip().upper().split())
 
 
+def _normalize_login_identifier(identifier: str) -> str:
+    cleaned = identifier.strip().lower()
+    if not cleaned:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email or matric number is required",
+        )
+    if "@" in cleaned:
+        return cleaned
+    compact = "".join(ch for ch in cleaned if ch.isalnum() or ch in {"-", "_", "."})
+    if not compact:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid matric number format",
+        )
+    return f"{compact}@student.local"
+
+
+def _normalize_session_key(session_key: Optional[str]) -> str:
+    if not session_key:
+        return datetime.now(timezone.utc).date().isoformat()
+    try:
+        return datetime.strptime(session_key.strip(), "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session key. Use YYYY-MM-DD",
+        ) from exc
+
+
+def _default_session_label(course_code: str, session_key: str) -> str:
+    return f"{course_code} Lecture {session_key}"
+
+
+def _anon_student_key(student_id: int, course_code: str, session_key: str) -> str:
+    payload = f"{student_id}:{course_code}:{session_key}".encode("utf-8")
+    return hmac.new(
+        ANON_KEY_SECRET.encode("utf-8"),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _resolve_token_session(db: Session, token_record: FeedbackToken) -> Tuple[str, str]:
+    metadata = (
+        db.query(TokenSession).filter(TokenSession.token_id == token_record.id).first()
+    )
+    if metadata:
+        return metadata.session_key, metadata.session_label
+
+    fallback_key = (
+        token_record.created_at.astimezone(timezone.utc).date().isoformat()
+        if token_record.created_at
+        else datetime.now(timezone.utc).date().isoformat()
+    )
+    return fallback_key, _default_session_label(token_record.course_code, fallback_key)
+
+
+def _log_admin_action(
+    db: Session,
+    admin_id: int,
+    action: str,
+    entity_type: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    details: Optional[dict] = None,
+) -> None:
+    record = AdminAuditLog(
+        admin_id=admin_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        details=json.dumps(details) if details else None,
+    )
+    db.add(record)
+
+
 def _resolve_semester(semester: Optional[str]) -> Tuple[str, int, datetime, datetime]:
     now = datetime.now(timezone.utc)
     parsed = _parse_semester(semester) if semester else None
@@ -372,16 +473,17 @@ def _pending_alerts_count(db: Session) -> int:
 
 @app.post("/auth/register", response_model=RegisterResponse)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> RegisterResponse:
-    if get_user_by_email(db, payload.email):
+    normalized_email = _normalize_login_identifier(payload.email)
+    if get_user_by_email(db, normalized_email):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email is already registered",
+            detail="Email or matric number is already registered",
         )
 
     user = User(
-        email=payload.email,
+        email=normalized_email,
         hashed_password=pwd_context.hash(payload.password),
-        role=payload.role,
+        role=UserRole.STUDENT,
     )
     db.add(user)
     db.commit()
@@ -391,7 +493,8 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> Registe
 
 @app.post("/auth/login", response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    user = get_user_by_email(db, payload.email)
+    normalized_email = _normalize_login_identifier(payload.email)
+    user = get_user_by_email(db, normalized_email)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
@@ -414,8 +517,84 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     return TokenResponse(access_token=token)
 
 
+@app.get("/feedback/token-status", response_model=TokenStatusResponse)
+def feedback_token_status(
+    token: str,
+    student: User = Depends(require_role(UserRole.STUDENT)),
+    db: Session = Depends(get_db),
+) -> TokenStatusResponse:
+    token_record = (
+        db.query(FeedbackToken)
+        .filter(FeedbackToken.token == token.strip())
+        .first()
+    )
+    if not token_record:
+        return TokenStatusResponse(
+            token=token.strip(),
+            valid=False,
+            is_used=False,
+            can_submit=False,
+            reason="Invalid feedback token",
+        )
+
+    session_key, session_label = _resolve_token_session(db, token_record)
+    anon_key = _anon_student_key(student.id, token_record.course_code, session_key)
+    already_submitted = (
+        db.query(StudentSessionSubmission.id)
+        .filter(
+            StudentSessionSubmission.anon_student_key == anon_key,
+            StudentSessionSubmission.course_code == token_record.course_code,
+            StudentSessionSubmission.session_key == session_key,
+        )
+        .first()
+        is not None
+    )
+    lecturer = db.query(User).filter(User.id == token_record.lecturer_id).first()
+
+    if token_record.is_used:
+        return TokenStatusResponse(
+            token=token_record.token,
+            valid=True,
+            is_used=True,
+            can_submit=False,
+            course_code=token_record.course_code,
+            lecturer_email=lecturer.email if lecturer else None,
+            session_key=session_key,
+            session_label=session_label,
+            reason="This token has already been used",
+        )
+
+    if already_submitted:
+        return TokenStatusResponse(
+            token=token_record.token,
+            valid=True,
+            is_used=False,
+            can_submit=False,
+            course_code=token_record.course_code,
+            lecturer_email=lecturer.email if lecturer else None,
+            session_key=session_key,
+            session_label=session_label,
+            reason="You already submitted feedback for this lecture session",
+        )
+
+    return TokenStatusResponse(
+        token=token_record.token,
+        valid=True,
+        is_used=False,
+        can_submit=True,
+        course_code=token_record.course_code,
+        lecturer_email=lecturer.email if lecturer else None,
+        session_key=session_key,
+        session_label=session_label,
+    )
+
+
 @app.post("/feedback/submit", response_model=FeedbackSubmitResponse)
-def submit_feedback(payload: FeedbackSubmitRequest, db: Session = Depends(get_db)) -> FeedbackSubmitResponse:
+def submit_feedback(
+    payload: FeedbackSubmitRequest,
+    student: User = Depends(require_role(UserRole.STUDENT)),
+    db: Session = Depends(get_db),
+) -> FeedbackSubmitResponse:
     token_record = (
         db.query(FeedbackToken)
         .filter(FeedbackToken.token == payload.token)
@@ -427,13 +606,31 @@ def submit_feedback(payload: FeedbackSubmitRequest, db: Session = Depends(get_db
             detail="Invalid or already used feedback token",
         )
 
-    if is_toxic_text(payload.text):
+    session_key, _session_label = _resolve_token_session(db, token_record)
+    anon_key = _anon_student_key(student.id, token_record.course_code, session_key)
+    existing_submission = (
+        db.query(StudentSessionSubmission)
+        .filter(
+            StudentSessionSubmission.anon_student_key == anon_key,
+            StudentSessionSubmission.course_code == token_record.course_code,
+            StudentSessionSubmission.session_key == session_key,
+        )
+        .first()
+    )
+    if existing_submission:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You already submitted feedback for this lecture session.",
+        )
+
+    reason = toxicity_reason(payload.text)
+    if reason:
         rejected_attempt = ToxicityRejectedAttempt(
             token_id=token_record.id,
             lecturer_id=token_record.lecturer_id,
             course_code=token_record.course_code,
             text=(payload.text or "").strip(),
-            reason="UNPROFESSIONAL_LANGUAGE",
+            reason=reason,
             is_reviewed=False,
         )
         db.add(rejected_attempt)
@@ -441,8 +638,8 @@ def submit_feedback(payload: FeedbackSubmitRequest, db: Session = Depends(get_db
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Please rephrase your comment using respectful language. "
-                "Focus on clear suggestions about teaching style, pace, or materials."
+                "We could not submit this yet. Please rephrase a few words to keep feedback respectful "
+                "and focused on teaching clarity, pace, or materials. Your token remains valid."
             ),
         )
 
@@ -457,10 +654,26 @@ def submit_feedback(payload: FeedbackSubmitRequest, db: Session = Depends(get_db
     )
     token_record.is_used = True
     token_record.used_at = datetime.now(timezone.utc)
+    submission_lock = StudentSessionSubmission(
+        anon_student_key=anon_key,
+        course_code=token_record.course_code,
+        session_key=session_key,
+        token_id=token_record.id,
+    )
 
     db.add(feedback)
-    db.commit()
+    db.add(submission_lock)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You already submitted feedback for this lecture session.",
+        ) from exc
     db.refresh(feedback)
+    submission_lock.feedback_id = feedback.id
+    db.commit()
 
     return FeedbackSubmitResponse(
         id=feedback.id,
@@ -575,7 +788,7 @@ def list_course_assignments(
 @app.post("/dashboard/admin/course-assignments", response_model=CourseAssignmentResponse)
 def create_course_assignment(
     payload: CourseAssignmentCreateRequest,
-    _user: User = Depends(require_role(UserRole.ADMIN)),
+    user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> CourseAssignmentResponse:
     lecturer = db.query(User).filter(User.id == payload.lecturer_id).first()
@@ -605,6 +818,14 @@ def create_course_assignment(
         course_code=course_code,
     )
     db.add(assignment)
+    _log_admin_action(
+        db,
+        admin_id=user.id,
+        action="COURSE_ASSIGNED",
+        entity_type="course_assignment",
+        entity_id=f"{payload.lecturer_id}:{course_code}",
+        details={"lecturer_id": payload.lecturer_id, "course_code": course_code},
+    )
     db.commit()
     db.refresh(assignment)
     return CourseAssignmentResponse(
@@ -619,7 +840,7 @@ def create_course_assignment(
 @app.delete("/dashboard/admin/course-assignments/{assignment_id}", response_model=ActionResponse)
 def delete_course_assignment(
     assignment_id: int,
-    _user: User = Depends(require_role(UserRole.ADMIN)),
+    user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> ActionResponse:
     assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
@@ -628,6 +849,17 @@ def delete_course_assignment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Course assignment not found",
         )
+    _log_admin_action(
+        db,
+        admin_id=user.id,
+        action="COURSE_UNASSIGNED",
+        entity_type="course_assignment",
+        entity_id=str(assignment.id),
+        details={
+            "lecturer_id": assignment.lecturer_id,
+            "course_code": assignment.course_code,
+        },
+    )
     db.delete(assignment)
     db.commit()
     return ActionResponse(message="Course assignment removed")
@@ -644,7 +876,7 @@ def _generate_unique_token(db: Session) -> str:
 @app.post("/dashboard/admin/tokens", response_model=TokenGenerateResponse)
 def generate_tokens(
     payload: TokenGenerateRequest,
-    _user: User = Depends(require_role(UserRole.ADMIN)),
+    user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> TokenGenerateResponse:
     lecturer = db.query(User).filter(User.id == payload.lecturer_id).first()
@@ -669,6 +901,13 @@ def generate_tokens(
             detail="Assign this course to the lecturer before generating tokens",
         )
 
+    session_key = _normalize_session_key(payload.session_key)
+    session_label = (
+        payload.session_label.strip()
+        if payload.session_label and payload.session_label.strip()
+        else _default_session_label(course_code, session_key)
+    )
+
     tokens: List[str] = []
 
     for _ in range(payload.quantity):
@@ -680,13 +919,38 @@ def generate_tokens(
             is_used=False,
         )
         db.add(token_record)
+        db.flush()
+        db.add(
+            TokenSession(
+                token_id=token_record.id,
+                course_code=course_code,
+                session_key=session_key,
+                session_label=session_label,
+            )
+        )
         tokens.append(token_value)
 
+    _log_admin_action(
+        db,
+        admin_id=user.id,
+        action="TOKEN_BATCH_GENERATED",
+        entity_type="token_batch",
+        entity_id=f"{course_code}:{session_key}",
+        details={
+            "course_code": course_code,
+            "lecturer_id": payload.lecturer_id,
+            "quantity": payload.quantity,
+            "session_key": session_key,
+            "session_label": session_label,
+        },
+    )
     db.commit()
 
     return TokenGenerateResponse(
         course_code=course_code,
         lecturer_id=payload.lecturer_id,
+        session_key=session_key,
+        session_label=session_label,
         tokens=tokens,
     )
 
@@ -699,7 +963,11 @@ def list_tokens(
     _user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> List[TokenListResponse]:
-    query = db.query(FeedbackToken, User.email).join(User, User.id == FeedbackToken.lecturer_id)
+    query = (
+        db.query(FeedbackToken, User.email, TokenSession.session_key, TokenSession.session_label)
+        .join(User, User.id == FeedbackToken.lecturer_id)
+        .outerjoin(TokenSession, TokenSession.token_id == FeedbackToken.id)
+    )
     if course_code:
         query = query.filter(FeedbackToken.course_code == _normalize_course_code(course_code))
     if lecturer_id:
@@ -715,11 +983,28 @@ def list_tokens(
             course_code=token.course_code,
             lecturer_id=token.lecturer_id,
             lecturer_email=email,
+            session_key=(
+                session_key
+                or (
+                    token.created_at.astimezone(timezone.utc).date().isoformat()
+                    if token.created_at
+                    else datetime.now(timezone.utc).date().isoformat()
+                )
+            ),
+            session_label=(
+                session_label
+                or _default_session_label(
+                    token.course_code,
+                    token.created_at.astimezone(timezone.utc).date().isoformat()
+                    if token.created_at
+                    else datetime.now(timezone.utc).date().isoformat(),
+                )
+            ),
             is_used=token.is_used,
             created_at=token.created_at.isoformat(),
             used_at=token.used_at.isoformat() if token.used_at else None,
         )
-        for token, email in rows
+        for token, email, session_key, session_label in rows
     ]
 
 
@@ -922,6 +1207,14 @@ def dismiss_toxicity_flag(
     )
     feedback.is_flagged = False
     db.add(review)
+    _log_admin_action(
+        db,
+        admin_id=user.id,
+        action="FLAG_DISMISSED",
+        entity_type="feedback",
+        entity_id=str(feedback.id),
+        details={"course_code": feedback.course_code, "lecturer_id": feedback.lecturer_id},
+    )
     db.commit()
     return ActionResponse(message="Flag dismissed")
 
@@ -956,6 +1249,17 @@ def dismiss_rejected_attempt(
     attempt.reviewed_at = datetime.now(timezone.utc)
     attempt.reviewed_by = user.id
     attempt.review_note = payload.note.strip() if payload and payload.note else None
+    _log_admin_action(
+        db,
+        admin_id=user.id,
+        action="REJECTED_ATTEMPT_DISMISSED",
+        entity_type="rejected_attempt",
+        entity_id=str(attempt.id),
+        details={
+            "course_code": attempt.course_code,
+            "lecturer_id": attempt.lecturer_id,
+        },
+    )
     db.commit()
     return ActionResponse(message="Rejected attempt dismissed")
 
@@ -963,7 +1267,7 @@ def dismiss_rejected_attempt(
 @app.get("/dashboard/admin/export/semester-summary")
 def export_semester_summary(
     semester: Optional[str] = None,
-    _user: User = Depends(require_role(UserRole.ADMIN)),
+    user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
     sem_type, sem_year, start, end = _resolve_semester(semester)
@@ -1015,6 +1319,15 @@ def export_semester_summary(
 
     payload = output.getvalue()
     filename = f"semester-summary-{_semester_value(sem_type, sem_year).lower()}.csv"
+    _log_admin_action(
+        db,
+        admin_id=user.id,
+        action="EXPORT_SEMESTER_SUMMARY",
+        entity_type="export",
+        entity_id=filename,
+        details={"semester": _semester_value(sem_type, sem_year)},
+    )
+    db.commit()
     return StreamingResponse(
         iter([payload]),
         media_type="text/csv",
@@ -1027,10 +1340,14 @@ def export_token_list(
     course_code: Optional[str] = None,
     lecturer_id: Optional[int] = None,
     semester: Optional[str] = None,
-    _user: User = Depends(require_role(UserRole.ADMIN)),
+    user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    query = db.query(FeedbackToken, User.email).join(User, User.id == FeedbackToken.lecturer_id)
+    query = (
+        db.query(FeedbackToken, User.email, TokenSession.session_key, TokenSession.session_label)
+        .join(User, User.id == FeedbackToken.lecturer_id)
+        .outerjoin(TokenSession, TokenSession.token_id == FeedbackToken.id)
+    )
     if course_code:
         query = query.filter(FeedbackToken.course_code == _normalize_course_code(course_code))
     if lecturer_id:
@@ -1049,18 +1366,33 @@ def export_token_list(
             "course_code",
             "lecturer_id",
             "lecturer_email",
+            "session_key",
+            "session_label",
             "is_used",
             "created_at",
             "used_at",
         ]
     )
-    for token, email in rows:
+    for token, email, session_key, session_label in rows:
+        resolved_session_key = (
+            session_key
+            or (
+                token.created_at.astimezone(timezone.utc).date().isoformat()
+                if token.created_at
+                else datetime.now(timezone.utc).date().isoformat()
+            )
+        )
+        resolved_session_label = (
+            session_label or _default_session_label(token.course_code, resolved_session_key)
+        )
         writer.writerow(
             [
                 token.token,
                 token.course_code,
                 token.lecturer_id,
                 email,
+                resolved_session_key,
+                resolved_session_label,
                 "yes" if token.is_used else "no",
                 token.created_at.isoformat(),
                 token.used_at.isoformat() if token.used_at else "",
@@ -1068,6 +1400,19 @@ def export_token_list(
         )
 
     payload = output.getvalue()
+    _log_admin_action(
+        db,
+        admin_id=user.id,
+        action="EXPORT_TOKEN_LIST",
+        entity_type="export",
+        entity_id="token-list.csv",
+        details={
+            "course_code": _normalize_course_code(course_code) if course_code else None,
+            "lecturer_id": lecturer_id,
+            "semester": semester,
+        },
+    )
+    db.commit()
     return StreamingResponse(
         iter([payload]),
         media_type="text/csv",

@@ -28,6 +28,7 @@ import {
   fetchToxicityFeed,
   generateFeedbackTokens,
 } from "../lib/api";
+import { getAuthToken } from "../lib/auth";
 
 type AdminMetrics = {
   total_feedbacks: number;
@@ -210,6 +211,7 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
 
   const [tokenCourseCode, setTokenCourseCode] = useState("");
   const [tokenLecturerId, setTokenLecturerId] = useState("");
+  const [tokenSessionKey, setTokenSessionKey] = useState("");
   const [tokenQuantity, setTokenQuantity] = useState(10);
   const [generatedTokens, setGeneratedTokens] = useState<string[]>([]);
   const [isGeneratingTokens, setIsGeneratingTokens] = useState(false);
@@ -222,29 +224,6 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
   const [downloadingCourseCode, setDownloadingCourseCode] = useState<string | null>(null);
   const [exportSemester, setExportSemester] = useState("");
   const [exportCourseCode, setExportCourseCode] = useState("");
-
-  const getAuthToken = () => {
-    if (typeof document === "undefined") return "";
-    const cookies = document.cookie.split("; ").map((item) => item.trim());
-    const tokenCookie = cookies.find(
-      (cookie) =>
-        cookie.startsWith("access_token=") ||
-        cookie.startsWith("token=") ||
-        cookie.startsWith("jwt="),
-    );
-    if (tokenCookie) {
-      return tokenCookie.split("=")[1] || "";
-    }
-    if (typeof localStorage !== "undefined") {
-      return (
-        localStorage.getItem("access_token") ||
-        localStorage.getItem("token") ||
-        localStorage.getItem("jwt") ||
-        ""
-      );
-    }
-    return "";
-  };
 
   const handleUnauthorized = useCallback((reasons: unknown[]) => {
     const hasUnauthorized = reasons.some((reason) => {
@@ -423,8 +402,12 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
         lecturer_id: Number(tokenLecturerId),
         course_code: tokenCourseCode.trim(),
         quantity: tokenQuantity,
+        session_key: tokenSessionKey.trim() || undefined,
       });
       setGeneratedTokens(response.data?.tokens || []);
+      if (response.data?.session_key) {
+        setTokenSessionKey(response.data.session_key);
+      }
       await refreshDashboard();
     } catch (errorResponse) {
       setError(getErrorMessage(errorResponse));
@@ -769,6 +752,13 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
               </select>
               <input
                 className="rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
+                type="date"
+                value={tokenSessionKey}
+                onChange={(event) => setTokenSessionKey(event.target.value)}
+                aria-label="Lecture session date"
+              />
+              <input
+                className="rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
                 type="number"
                 min={1}
                 max={500}
@@ -790,6 +780,9 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
             <div className="mt-4 rounded-xl border border-slate-800/70 bg-slate-950/70 p-4">
               <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
                 Latest Token Batch
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                Session date controls one-feedback-per-student for that lecture.
               </p>
               {latestGeneratedCount === 0 ? (
                 <p className="mt-2 text-sm text-slate-500">

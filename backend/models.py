@@ -52,6 +52,9 @@ class User(Base):
     flag_reviews = relationship(
         "FeedbackFlagReview", back_populates="reviewer", foreign_keys="FeedbackFlagReview.reviewed_by"
     )
+    admin_audit_logs = relationship(
+        "AdminAuditLog", back_populates="admin", foreign_keys="AdminAuditLog.admin_id"
+    )
 
 
 class LecturerProfile(Base):
@@ -80,6 +83,10 @@ class FeedbackToken(Base):
     lecturer = relationship("User", back_populates="feedback_tokens", foreign_keys=[lecturer_id])
     feedbacks = relationship("Feedback", back_populates="token")
     rejected_attempts = relationship("ToxicityRejectedAttempt", back_populates="token")
+    session_metadata = relationship("TokenSession", back_populates="token", uselist=False)
+    student_submissions = relationship(
+        "StudentSessionSubmission", back_populates="token", foreign_keys="StudentSessionSubmission.token_id"
+    )
 
 
 class CourseAssignment(Base):
@@ -148,3 +155,52 @@ class ToxicityRejectedAttempt(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     token = relationship("FeedbackToken", back_populates="rejected_attempts", foreign_keys=[token_id])
+
+
+class TokenSession(Base):
+    __tablename__ = "token_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token_id = Column(Integer, ForeignKey("feedback_tokens.id"), unique=True, nullable=False, index=True)
+    course_code = Column(String(50), nullable=False, index=True)
+    session_key = Column(String(32), nullable=False, index=True)
+    session_label = Column(String(120), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    token = relationship("FeedbackToken", back_populates="session_metadata", foreign_keys=[token_id])
+
+
+class StudentSessionSubmission(Base):
+    __tablename__ = "student_session_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "anon_student_key",
+            "course_code",
+            "session_key",
+            name="uq_student_session_submission_once",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    anon_student_key = Column(String(128), nullable=False, index=True)
+    course_code = Column(String(50), nullable=False, index=True)
+    session_key = Column(String(32), nullable=False, index=True)
+    token_id = Column(Integer, ForeignKey("feedback_tokens.id"), nullable=False, index=True)
+    feedback_id = Column(Integer, ForeignKey("feedback.id"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    token = relationship("FeedbackToken", back_populates="student_submissions", foreign_keys=[token_id])
+
+
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    action = Column(String(100), nullable=False, index=True)
+    entity_type = Column(String(100), nullable=True, index=True)
+    entity_id = Column(String(100), nullable=True, index=True)
+    details = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    admin = relationship("User", back_populates="admin_audit_logs", foreign_keys=[admin_id])

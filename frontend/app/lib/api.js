@@ -7,7 +7,16 @@ const api = axios.create({
   },
 });
 
-export const submitFeedback = (payload) => api.post("/feedback/submit", payload);
+export const submitFeedback = (payload, token) =>
+  api.post("/feedback/submit", payload, {
+    headers: buildAuthHeaders(token),
+  });
+
+export const fetchFeedbackTokenStatus = (authToken, feedbackToken) =>
+  api.get("/feedback/token-status", {
+    headers: buildAuthHeaders(authToken),
+    params: { token: feedbackToken },
+  });
 
 const buildAuthHeaders = (token) =>
   token ? { Authorization: `Bearer ${token}` } : undefined;

@@ -40,7 +40,7 @@ const decodeRoleFromToken = (token: string) => {
 
 const isDashboardPath = (pathname: string) => pathname.startsWith("/dashboard");
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (!isDashboardPath(pathname)) {
     return NextResponse.next();

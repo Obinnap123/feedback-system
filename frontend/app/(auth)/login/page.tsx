@@ -2,13 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { loginUser, registerUser } from "../lib/api";
-
-const roleOptions = [
-  { label: "Student", value: "STUDENT" },
-  { label: "Lecturer", value: "LECTURER" },
-  { label: "Admin", value: "ADMIN" },
-];
+import { loginUser } from "../../lib/api";
+import { decodeTokenRole, resolveDashboardRoute } from "../../lib/auth";
 
 const formatDetail = (detail: unknown): string | null => {
   if (typeof detail === "string") return detail;
@@ -37,7 +32,7 @@ const formatDetail = (detail: unknown): string | null => {
 
 const getErrorMessage = (error: unknown): string => {
   if (!error || typeof error !== "object") {
-    return "Unable to register.";
+    return "Unable to log in.";
   }
 
   const maybeAny = error as {
@@ -51,36 +46,33 @@ const getErrorMessage = (error: unknown): string => {
     detailMessage ||
     errorMessage ||
     maybeAny.message ||
-    "Unable to register."
+    "Unable to log in."
   );
 };
 
-export default function RegisterPage() {
+export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState("STUDENT");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoading(true);
     setError(null);
-    setSuccess(null);
 
     try {
-      await registerUser({ email, password, role });
-      const loginResponse = await loginUser({ email, password });
-      const token = loginResponse.data?.access_token;
+      const response = await loginUser({ email, password });
+      const token = response.data?.access_token;
       if (!token) {
-        setSuccess("Registered. Please log in.");
+        setError("Invalid login response.");
         return;
       }
 
       document.cookie = `access_token=${token}; path=/; max-age=86400; samesite=lax`;
-      router.push("/dashboard");
+      const role = decodeTokenRole(token);
+      router.push(resolveDashboardRoute(role));
     } catch (errorResponse) {
       setError(getErrorMessage(errorResponse));
     } finally {
@@ -93,13 +85,18 @@ export default function RegisterPage() {
       <div className="mx-auto flex w-full max-w-md flex-col gap-6 px-6 py-16">
         <header className="space-y-2">
           <p className="text-xs uppercase tracking-[0.3em] text-slate-400">
-            Create Account
+            Dashboard Login
           </p>
-          <h1 className="text-3xl font-semibold text-white">
-            Set up your access
-          </h1>
+          <h1 className="text-3xl font-semibold text-white">Welcome back</h1>
           <p className="text-sm text-slate-400">
-            Register a user to access the dashboard.
+            Sign in to access your dashboard. Need an account?{" "}
+            <a
+              href="/register"
+              className="font-semibold text-indigo-300 hover:text-indigo-200"
+            >
+              Register here
+            </a>
+            .
           </p>
         </header>
 
@@ -109,23 +106,17 @@ export default function RegisterPage() {
           </div>
         )}
 
-        {success && (
-          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-            {success}
-          </div>
-        )}
-
         <form
           onSubmit={handleSubmit}
           className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-6 shadow-2xl shadow-slate-950/60"
         >
           <label className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
-            Email
+            Email or Matric Number
           </label>
           <input
             className="mt-3 w-full rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
-            type="email"
-            placeholder="you@school.edu"
+            type="text"
+            placeholder="you@school.edu or U23CS1001"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             required
@@ -137,33 +128,18 @@ export default function RegisterPage() {
           <input
             className="mt-3 w-full rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
             type="password"
-            placeholder="Minimum 6 characters"
+            placeholder="••••••••"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             required
           />
-
-          <label className="mt-6 block text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
-            Role
-          </label>
-          <select
-            className="mt-3 w-full rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
-            value={role}
-            onChange={(event) => setRole(event.target.value)}
-          >
-            {roleOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
 
           <button
             type="submit"
             disabled={loading}
             className="mt-6 w-full rounded-xl bg-indigo-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {loading ? "Creating..." : "Create Account"}
+            {loading ? "Signing in..." : "Sign In"}
           </button>
         </form>
       </div>

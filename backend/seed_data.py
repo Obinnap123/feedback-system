@@ -10,11 +10,14 @@ from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine
 from models import (
+    AdminAuditLog,
     CourseAssignment,
     Feedback,
     FeedbackFlagReview,
     FeedbackToken,
     FlagReviewAction,
+    StudentSessionSubmission,
+    TokenSession,
     ToxicityRejectedAttempt,
     User,
     UserRole,
@@ -50,6 +53,10 @@ TOXIC_COMMENTS = [
     "The class was stupid and useless.",
     "Worst lecturer ever, nonsense delivery.",
 ]
+
+
+def _default_session_label(course_code: str, session_key: str) -> str:
+    return f"{course_code} Lecture {session_key}"
 
 
 def _random_date(start: datetime, end: datetime) -> datetime:
@@ -93,6 +100,20 @@ def _clear_demo_data(db: Session, lecturer_ids: list[int]) -> None:
             FeedbackFlagReview.feedback_id.in_(feedback_ids)
         ).delete(synchronize_session=False)
 
+    token_ids = [
+        item[0]
+        for item in db.query(FeedbackToken.id)
+        .filter(FeedbackToken.lecturer_id.in_(lecturer_ids))
+        .all()
+    ]
+
+    if token_ids:
+        db.query(StudentSessionSubmission).filter(
+            StudentSessionSubmission.token_id.in_(token_ids)
+        ).delete(synchronize_session=False)
+        db.query(TokenSession).filter(TokenSession.token_id.in_(token_ids)).delete(
+            synchronize_session=False
+        )
     db.query(Feedback).filter(Feedback.lecturer_id.in_(lecturer_ids)).delete(
         synchronize_session=False
     )
@@ -105,6 +126,7 @@ def _clear_demo_data(db: Session, lecturer_ids: list[int]) -> None:
     db.query(CourseAssignment).filter(
         CourseAssignment.lecturer_id.in_(lecturer_ids)
     ).delete(synchronize_session=False)
+    db.query(AdminAuditLog).delete(synchronize_session=False)
 
 
 def _seed_for_assignment(
@@ -133,6 +155,20 @@ def _seed_for_assignment(
         db.add(token)
         tokens.append(token)
     db.flush()
+    for token in tokens:
+        session_key = (
+            token.created_at.astimezone(timezone.utc).date().isoformat()
+            if token.created_at
+            else datetime.now(timezone.utc).date().isoformat()
+        )
+        db.add(
+            TokenSession(
+                token_id=token.id,
+                course_code=course_code,
+                session_key=session_key,
+                session_label=_default_session_label(course_code, session_key),
+            )
+        )
 
     selected_tokens = random.sample(tokens, used_tokens)
     for index, token in enumerate(selected_tokens):

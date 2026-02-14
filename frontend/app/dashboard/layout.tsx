@@ -11,6 +11,7 @@ import {
   Menu,
   X,
 } from "lucide-react";
+import { decodeTokenRole } from "../lib/auth";
 
 const readRoleFromCookie = (): string | null => {
   if (typeof document === "undefined") return null;
@@ -23,15 +24,7 @@ const readRoleFromCookie = (): string | null => {
   );
   const token = tokenCookie?.split("=")[1];
   if (!token) return null;
-  const parts = token.split(".");
-  if (parts.length < 2) return null;
-  try {
-    const payload = JSON.parse(atob(parts[1]));
-    const rawRole = payload?.role || payload?.user_role || payload?.type || null;
-    return typeof rawRole === "string" ? rawRole.toUpperCase() : null;
-  } catch {
-    return null;
-  }
+  return decodeTokenRole(token);
 };
 
 const subscribeNoop = () => () => {};

@@ -1,5 +1,5 @@
-import ChatbotFeedback from "./components/ChatbotFeedback";
+import { redirect } from "next/navigation";
 
 export default function Home() {
-  return <ChatbotFeedback />;
+  redirect("/register");
 }
