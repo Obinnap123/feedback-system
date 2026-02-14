@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 import secrets
 import json
+import os
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,9 +49,32 @@ auth_scheme = HTTPBearer()
 
 app = FastAPI(title="Feedback System API")
 
+
+def _cors_allowed_origins() -> List[str]:
+    defaults = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    configured = [
+        item.strip().rstrip("/")
+        for item in raw.split(",")
+        if item and item.strip()
+    ]
+
+    merged: List[str] = []
+    seen: set[str] = set()
+    for origin in defaults + configured:
+        normalized = origin.rstrip("/")
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            merged.append(normalized)
+    return merged
+
+
+_cors_origin_regex = os.getenv("CORS_ALLOWED_ORIGIN_REGEX")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_allowed_origins(),
+    allow_origin_regex=_cors_origin_regex if _cors_origin_regex else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
