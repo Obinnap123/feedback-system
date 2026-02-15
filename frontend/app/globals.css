@@ -25,6 +25,15 @@ body {
   overflow-x: hidden;
 }
 
+/* Prevent mobile browsers from zooming focused form fields. */
+@media (max-width: 1024px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
 .scrollbar-hidden {
   -ms-overflow-style: none;
   scrollbar-width: none;
