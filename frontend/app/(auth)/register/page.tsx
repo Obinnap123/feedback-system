@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { loginUser, registerUser } from "../../lib/api";
-import { decodeTokenRole, resolveDashboardRoute } from "../../lib/auth";
+import { authService } from "../../../services/auth";
+import { decodeTokenRole, resolveDashboardRoute } from "../../../utils/auth";
 
 const formatDetail = (detail: unknown): string | null => {
   if (typeof detail === "string") return detail;
@@ -65,8 +65,8 @@ export default function RegisterPage() {
     setSuccess(null);
 
     try {
-      await registerUser({ email, password });
-      const loginResponse = await loginUser({ email, password });
+      await authService.register({ email, password });
+      const loginResponse = await authService.login({ email, password });
       const token = loginResponse.data?.access_token;
       if (!token) {
         setSuccess("Registered. Please log in.");

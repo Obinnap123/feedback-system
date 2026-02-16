@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { loginUser } from "../../lib/api";
-import { decodeTokenRole, resolveDashboardRoute } from "../../lib/auth";
+import { authService } from "../../../services/auth";
+import { decodeTokenRole, resolveDashboardRoute } from "../../../utils/auth";
 
 const formatDetail = (detail: unknown): string | null => {
   if (typeof detail === "string") return detail;
@@ -63,7 +63,7 @@ export default function LoginPage() {
     setError(null);
 
     try {
-      const response = await loginUser({ email, password });
+      const response = await authService.login({ email, password });
       const token = response.data?.access_token;
       if (!token) {
         setError("Invalid login response.");

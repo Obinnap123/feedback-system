@@ -11,7 +11,7 @@ import {
   Menu,
   X,
 } from "lucide-react";
-import { decodeTokenRole } from "../lib/auth";
+import { decodeTokenRole } from "../../utils/auth";
 
 const readRoleFromCookie = (): string | null => {
   if (typeof document === "undefined") return null;
@@ -27,7 +27,7 @@ const readRoleFromCookie = (): string | null => {
   return decodeTokenRole(token);
 };
 
-const subscribeNoop = () => () => {};
+const subscribeNoop = () => () => { };
 
 export default function DashboardLayout({
   children,
@@ -64,25 +64,23 @@ export default function DashboardLayout({
           <button
             type="button"
             onClick={toggleSidebar}
-            className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-800/80 text-slate-200 transition hover:border-indigo-400/60 hover:text-white"
-            aria-label={sidebarOpen ? "Close menu" : "Open menu"}
+            className={`flex h-10 w-10 items-center justify-center rounded-xl border border-slate-800/80 text-slate-200 transition hover:border-indigo-400/60 hover:text-white ${sidebarOpen ? "invisible opacity-0" : ""}`}
+            aria-label="Open menu"
           >
-            {sidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+            <Menu className="h-5 w-5" />
           </button>
         </header>
 
         <div
-          className={`fixed inset-0 z-40 bg-slate-950/70 transition lg:hidden ${
-            sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0"
-          }`}
+          className={`fixed inset-0 z-40 bg-slate-950/70 transition lg:hidden ${sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
           onClick={closeSidebar}
           aria-hidden="true"
         />
 
         <aside
-          className={`fixed inset-y-0 left-0 z-50 w-72 border-r border-slate-800/80 bg-slate-900 transition-transform lg:w-64 lg:translate-x-0 lg:overflow-y-auto ${
-            sidebarOpen ? "translate-x-0" : "-translate-x-full"
-          }`}
+          className={`fixed inset-y-0 left-0 z-50 w-72 border-r border-slate-800/80 bg-slate-900 transition-transform lg:w-64 lg:translate-x-0 lg:overflow-y-auto ${sidebarOpen ? "translate-x-0" : "-translate-x-full"
+            }`}
         >
           <div className="flex h-full flex-col px-5 py-6">
             <div className="flex items-center justify-between">

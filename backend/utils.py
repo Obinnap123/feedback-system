@@ -1,13 +1,51 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+import json
+from typing import Optional, Any
 
 from better_profanity import profanity
 from fastapi import HTTPException, status
-
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+from models import AdminAuditLog, Feedback, FeedbackFlagReview, ToxicityRejectedAttempt
 
 profanity.load_censor_words()
+
+
+def log_admin_action(
+    db: Session,
+    admin_id: int,
+    action: str,
+    entity_type: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    details: Optional[dict] = None,
+) -> None:
+    record = AdminAuditLog(
+        admin_id=admin_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        details=json.dumps(details) if details else None,
+    )
+    db.add(record)
+
+
+def pending_alerts_count(db: Session) -> int:
+    feedback_pending = (
+        db.query(func.count(Feedback.id))
+        .outerjoin(FeedbackFlagReview, FeedbackFlagReview.feedback_id == Feedback.id)
+        .filter(Feedback.is_flagged.is_(True), FeedbackFlagReview.id.is_(None))
+        .scalar()
+        or 0
+    )
+    rejected_pending = (
+        db.query(func.count(ToxicityRejectedAttempt.id))
+        .filter(ToxicityRejectedAttempt.is_reviewed.is_(False))
+        .scalar()
+        or 0
+    )
+    return int(feedback_pending) + int(rejected_pending)
 
 _LEETSPEAK_MAP = str.maketrans(
     {
@@ -93,7 +131,101 @@ def enforce_toxicity_guard(text: str | None) -> None:
         )
 
 
-def clean_feedback_text(text: str | None) -> str | None:
-    if text is None:
-        return None
     return profanity.censor(text)
+
+
+def default_session_label(course_code: str, session_key: str) -> str:
+    return f"{course_code} Lecture {session_key}"
+
+
+def normalize_course_code(course_code: str) -> str:
+    return "".join(course_code.strip().upper().split())
+
+
+def normalize_session_key(session_key: Optional[str]) -> str:
+    from datetime import datetime, timezone
+    if not session_key:
+        return datetime.now(timezone.utc).date().isoformat()
+    try:
+        return datetime.strptime(session_key.strip(), "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session key. Use YYYY-MM-DD",
+        ) from exc
+
+
+# Semester Logic
+from datetime import datetime, timezone, timedelta
+from typing import Tuple, List
+
+def semester_index(semester_type: str, year: int) -> int:
+    return year * 2 + (1 if semester_type == "HARMATTAN" else 0)
+
+
+def semester_from_index(index: int) -> Tuple[str, int]:
+    year = index // 2
+    if index % 2 == 0:
+        return "RAIN", year
+    return "HARMATTAN", year
+
+
+def semester_from_date(value: datetime) -> Tuple[str, int]:
+    if value.month >= 10:
+        return "HARMATTAN", value.year
+    if value.month <= 3:
+        return "HARMATTAN", value.year - 1
+    return "RAIN", value.year
+
+
+def semester_label(semester_type: str, year: int) -> str:
+    if semester_type == "HARMATTAN":
+        return f"Harmattan {year}/{year + 1}"
+    return f"Rain {year}"
+
+
+def semester_window(semester_type: str, year: int) -> Tuple[datetime, datetime]:
+    if semester_type == "HARMATTAN":
+        return (
+            datetime(year, 10, 1, tzinfo=timezone.utc),
+            datetime(year + 1, 4, 1, tzinfo=timezone.utc),
+        )
+    return (
+        datetime(year, 4, 1, tzinfo=timezone.utc),
+        datetime(year, 10, 1, tzinfo=timezone.utc),
+    )
+
+
+def semester_range_label(start: datetime, end: datetime) -> str:
+    end_inclusive = end - timedelta(days=1)
+    return f"{start:%b %d, %Y} - {end_inclusive:%b %d, %Y}"
+
+
+def semester_value(semester_type: str, year: int) -> str:
+    return f"{semester_type}-{year}"
+
+
+def parse_semester(value: str) -> Optional[Tuple[str, int]]:
+    try:
+        semester_type, year_text = value.strip().upper().split("-", 1)
+        if semester_type not in {"HARMATTAN", "RAIN"}:
+            return None
+        return semester_type, int(year_text)
+    except Exception:
+        return None
+
+
+def resolve_semester(semester: Optional[str]) -> Tuple[str, int, datetime, datetime]:
+    now = datetime.now(timezone.utc)
+    parsed = parse_semester(semester) if semester else None
+    if semester and not parsed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid semester format. Use HARMATTAN-YYYY or RAIN-YYYY",
+        )
+    if parsed:
+        sem_type, sem_year = parsed
+    else:
+        sem_type, sem_year = semester_from_date(now)
+    start, end = semester_window(sem_type, sem_year)
+    return sem_type, sem_year, start, end
