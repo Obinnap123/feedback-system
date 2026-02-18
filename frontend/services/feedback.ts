@@ -1,6 +1,8 @@
 import { AxiosResponse } from "axios";
 import api, { buildAuthHeaders } from "./api";
 import {
+    FeedbackModerationRequest,
+    FeedbackModerationResponse,
     FeedbackSubmitRequest,
     FeedbackSubmitResponse,
     TokenStatusResponse,
@@ -24,5 +26,11 @@ export const feedbackService = {
         return api.post("/feedback/submit", payload, {
             headers: buildAuthHeaders(authToken),
         });
+    },
+
+    moderateFeedback: (
+        payload: FeedbackModerationRequest
+    ): Promise<AxiosResponse<FeedbackModerationResponse>> => {
+        return api.post("/feedback/moderate", payload);
     },
 };

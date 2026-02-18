@@ -37,6 +37,16 @@ class FeedbackSubmitResponse(BaseModel):
     is_flagged: bool
 
 
+class FeedbackModerationRequest(BaseModel):
+    text: Optional[str] = None
+
+
+class FeedbackModerationResponse(BaseModel):
+    is_allowed: bool
+    reason: Optional[str] = None
+    message: Optional[str] = None
+
+
 class KPICard(BaseModel):
     key: str
     label: str

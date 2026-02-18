@@ -17,8 +17,14 @@ from models import (
     TokenSession,
     ToxicityRejectedAttempt,
 )
-from schemas import FeedbackSubmitRequest, FeedbackSubmitResponse, TokenStatusResponse
-from dependencies import get_current_user, require_role, ANON_KEY_SECRET
+from schemas import (
+    FeedbackSubmitRequest,
+    FeedbackSubmitResponse,
+    FeedbackModerationRequest,
+    FeedbackModerationResponse,
+    TokenStatusResponse,
+)
+from dependencies import require_role, ANON_KEY_SECRET
 from utils import toxicity_reason, default_session_label
 
 router = APIRouter(prefix="/feedback", tags=["Feedback"])
@@ -46,6 +52,21 @@ def _resolve_token_session(db: Session, token_record: FeedbackToken) -> Tuple[st
         else datetime.now(timezone.utc).date().isoformat()
     )
     return fallback_key, default_session_label(token_record.course_code, fallback_key)
+
+
+@router.post("/moderate", response_model=FeedbackModerationResponse)
+def moderate_feedback(payload: FeedbackModerationRequest) -> FeedbackModerationResponse:
+    reason = toxicity_reason(payload.text)
+    if reason:
+        return FeedbackModerationResponse(
+            is_allowed=False,
+            reason=reason,
+            message=(
+                "We detected abusive or disrespectful language. "
+                "Please rephrase your comment before submitting."
+            ),
+        )
+    return FeedbackModerationResponse(is_allowed=True)
 
 
 @router.get("/token-status", response_model=TokenStatusResponse)

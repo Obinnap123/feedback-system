@@ -11,6 +11,16 @@ export interface FeedbackSubmitResponse {
     is_flagged: boolean;
 }
 
+export interface FeedbackModerationRequest {
+    text?: string;
+}
+
+export interface FeedbackModerationResponse {
+    is_allowed: boolean;
+    reason?: string;
+    message?: string;
+}
+
 export interface TokenStatusResponse {
     token: string;
     valid: boolean;

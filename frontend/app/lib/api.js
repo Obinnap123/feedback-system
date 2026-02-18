@@ -18,6 +18,9 @@ export const fetchFeedbackTokenStatus = (authToken, feedbackToken) =>
     params: { token: feedbackToken },
   });
 
+export const moderateFeedback = (text) =>
+  api.post("/feedback/moderate", { text });
+
 const buildAuthHeaders = (token) =>
   token ? { Authorization: `Bearer ${token}` } : undefined;
 

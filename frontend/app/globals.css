@@ -23,6 +23,31 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, sans-serif;
   overflow-x: hidden;
+  cursor: default;
+}
+
+a,
+button,
+summary,
+[role="button"] {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input,
+textarea,
+select,
+[contenteditable="true"] {
+  cursor: text;
+}
+
+input:disabled,
+textarea:disabled,
+select:disabled {
+  cursor: not-allowed;
 }
 
 /* Prevent mobile browsers from zooming focused form fields. */

@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Star } from "lucide-react";
-import { fetchFeedbackTokenStatus, submitFeedback } from "../lib/api";
+import { fetchFeedbackTokenStatus, moderateFeedback, submitFeedback } from "../lib/api";
 import { getAuthToken } from "../lib/auth";
 
 const STAR_RANGE = [1, 2, 3, 4, 5];
@@ -122,6 +122,10 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submissionNotice, setSubmissionNotice] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [checkingModeration, setCheckingModeration] = useState(false);
+  const [moderationIssue, setModerationIssue] = useState<string | null>(null);
+  const [lastModeratedText, setLastModeratedText] = useState("");
+  const moderationRequestId = useRef(0);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -196,6 +200,57 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
     localStorage.setItem(getDraftKey(token), payload);
   }, [token, rating, quickAnswers, text, submitted]);
 
+  const checkFeedbackModeration = useCallback(async (rawText: string) => {
+    const normalizedText = rawText.trim();
+    if (!normalizedText) {
+      setCheckingModeration(false);
+      setModerationIssue(null);
+      setLastModeratedText("");
+      return;
+    }
+
+    const requestId = ++moderationRequestId.current;
+    setCheckingModeration(true);
+    try {
+      const response = await moderateFeedback(normalizedText);
+      if (requestId !== moderationRequestId.current) return;
+
+      setLastModeratedText(normalizedText);
+      if (response.data?.is_allowed === false) {
+        setModerationIssue(
+          response.data.message ||
+            "Abusive or disrespectful language detected. Please rephrase your comment.",
+        );
+      } else {
+        setModerationIssue(null);
+      }
+    } catch {
+      if (requestId !== moderationRequestId.current) return;
+      setLastModeratedText(normalizedText);
+      setModerationIssue(null);
+    } finally {
+      if (requestId === moderationRequestId.current) {
+        setCheckingModeration(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (submitted) return;
+    const normalizedText = text.trim();
+    if (!normalizedText) {
+      moderationRequestId.current += 1;
+      setCheckingModeration(false);
+      setModerationIssue(null);
+      setLastModeratedText("");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void checkFeedbackModeration(normalizedText);
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [text, submitted, checkFeedbackModeration]);
+
   const handleRatingSelect = (value: number) => {
     if (submitted) return;
     setSubmitError(null);
@@ -212,6 +267,7 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
     if (isSubmitting || submitted) return;
     setSubmissionNotice(null);
     setSubmitError(null);
+    const normalizedComment = text.trim();
 
     if (!authToken) {
       setSubmitError("Please login as a student before submitting feedback.");
@@ -238,13 +294,19 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
       return;
     }
 
-    if (!text.trim()) {
+    if (!normalizedComment) {
       showToast("Please answer the guided questions and write your final comment.");
       return;
     }
 
-    if (text.trim().length < 20) {
-      showToast("Please provide at least 20 characters so your feedback is useful.");
+    const moderationPending = normalizedComment !== lastModeratedText;
+    if (checkingModeration || moderationPending) {
+      showToast("Please wait while we check your feedback language.");
+      return;
+    }
+
+    if (moderationIssue) {
+      setSubmitError(moderationIssue);
       return;
     }
 
@@ -253,7 +315,7 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
       const quickSummary = QUICK_QUESTIONS.map(
         (question) => `${question.prompt}: ${quickAnswers[question.id] || "-"}`,
       ).join(" | ");
-      const combinedText = `Quick responses: ${quickSummary}\nStudent comment: ${text.trim()}`;
+      const combinedText = `Quick responses: ${quickSummary}\nStudent comment: ${normalizedComment}`;
 
       await submitFeedback(
         {
@@ -305,6 +367,9 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
   const stepLabel = submitted ? "Complete" : rating ? "Step 2 of 2" : "Step 1 of 2";
   const displayRating = hoverRating || rating;
   const answeredCount = Object.keys(quickAnswers).length;
+  const moderationPending = text.trim().length > 0 && text.trim() !== lastModeratedText;
+  const submitDisabled =
+    isSubmitting || submitted || checkingModeration || moderationPending || Boolean(moderationIssue);
 
   return (
     <div
@@ -490,12 +555,24 @@ export default function ChatbotFeedback({ embedded = false }: ChatbotFeedbackPro
                     }}
                     disabled={submitted}
                   />
+                  {(checkingModeration || moderationPending) && !submitted && (
+                    <p className="text-xs text-indigo-200">Checking language safety...</p>
+                  )}
+                  {moderationIssue && !submitted && (
+                    <p className="rounded-xl border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
+                      {moderationIssue}
+                    </p>
+                  )}
                   <div className="flex flex-wrap items-center gap-3">
                     <button
                       type="button"
                       onClick={handleSubmit}
-                      disabled={isSubmitting || submitted}
-                      className="rounded-xl bg-indigo-500 px-6 py-3 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={submitDisabled}
+                      className={`rounded-xl px-6 py-3 text-sm font-semibold transition ${
+                        submitDisabled
+                          ? "cursor-not-allowed border border-slate-700 bg-slate-800 text-slate-400"
+                          : "bg-indigo-500 text-white hover:bg-indigo-400"
+                      }`}
                     >
                       {isSubmitting ? "Submitting..." : "Submit Feedback"}
                     </button>
