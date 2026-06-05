@@ -39,9 +39,12 @@ button:disabled {
 
 input,
 textarea,
-select,
 [contenteditable="true"] {
   cursor: text;
+}
+
+select {
+  cursor: pointer;
 }
 
 input:disabled,

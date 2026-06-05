@@ -26,6 +26,8 @@ const buildAuthHeaders = (token) =>
 
 export const loginUser = (payload) => api.post("/auth/login", payload);
 export const registerUser = (payload) => api.post("/auth/register", payload);
+export const fetchCurrentUser = (token) =>
+  api.get("/auth/me", { headers: buildAuthHeaders(token) });
 
 export const fetchAdminDashboard = (token) =>
   api.get("/dashboard/admin", { headers: buildAuthHeaders(token) });

@@ -22,6 +22,7 @@ import {
   exportTokenList,
   fetchAdminDashboard,
   fetchAdminLeaderboard,
+  fetchCurrentUser,
   fetchAdminLecturers,
   fetchCourseAssignments,
   fetchTokenTracker,
@@ -90,6 +91,21 @@ const formatDate = (value: string) => {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleString();
+};
+
+const getGreeting = () => {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good Morning";
+  if (hour < 17) return "Good Afternoon";
+  return "Good Evening";
+};
+
+const getDisplayName = (email: string | null | undefined, fallback = "there") => {
+  if (!email) return fallback;
+  const localPart = email.split("@")[0] || "";
+  const firstName = localPart.split(/[._-]/).find(Boolean);
+  if (!firstName) return fallback;
+  return firstName.charAt(0).toUpperCase() + firstName.slice(1);
 };
 
 const formatDetail = (detail: unknown): string | null => {
@@ -195,8 +211,10 @@ type AdminDashboardProps = {
 export default function AdminDashboard({ embedded = false }: AdminDashboardProps) {
   const router = useRouter();
   const [token, setToken] = useState("");
+  const [adminEmail, setAdminEmail] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [lecturers, setLecturers] = useState<LecturerOption[]>([]);
@@ -339,6 +357,18 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
 
   useEffect(() => {
     if (!token) return;
+    void fetchCurrentUser(token)
+      .then((response) => {
+        setAdminEmail(response.data?.email || null);
+      })
+      .catch((errorResponse) => {
+        if (handleUnauthorized([errorResponse])) return;
+        setAdminEmail(null);
+      });
+  }, [handleUnauthorized, token]);
+
+  useEffect(() => {
+    if (!token) return;
     const timer = window.setTimeout(() => {
       void loadLeaderboard(token, searchTerm);
     }, 200);
@@ -353,19 +383,25 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
   const handleCreateAssignment = async () => {
     if (!token) return;
     if (!assignmentCourseCode.trim() || !assignmentLecturerId) {
+      setSuccessMessage(null);
       setError("Select a lecturer and enter a course code.");
       return;
     }
 
     setIsAssigning(true);
     setError(null);
+    setSuccessMessage(null);
     try {
-      await createCourseAssignment(token, {
+      const response = await createCourseAssignment(token, {
         lecturer_id: Number(assignmentLecturerId),
         course_code: assignmentCourseCode.trim(),
       });
       setAssignmentCourseCode("");
       await refreshDashboard();
+      const assignment = response.data;
+      setSuccessMessage(
+        `Successfully linked ${assignment.lecturer_email} to ${assignment.course_code}.`,
+      );
     } catch (errorResponse) {
       setError(getErrorMessage(errorResponse));
     } finally {
@@ -376,6 +412,7 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
   const handleDeleteAssignment = async (assignmentId: number) => {
     if (!token) return;
     setError(null);
+    setSuccessMessage(null);
     try {
       await deleteCourseAssignment(token, assignmentId);
       await refreshDashboard();
@@ -387,16 +424,19 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
   const handleGenerateTokens = async () => {
     if (!token) return;
     if (!tokenCourseCode.trim() || !tokenLecturerId) {
+      setSuccessMessage(null);
       setError("Select a lecturer and course for token generation.");
       return;
     }
     if (tokenQuantity < 1 || tokenQuantity > 500) {
+      setSuccessMessage(null);
       setError("Quantity must be between 1 and 500.");
       return;
     }
 
     setIsGeneratingTokens(true);
     setError(null);
+    setSuccessMessage(null);
     try {
       const response = await generateFeedbackTokens(token, {
         lecturer_id: Number(tokenLecturerId),
@@ -584,13 +624,20 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
             Admin Dashboard
           </p>
           <h1 className="text-3xl font-semibold text-white sm:text-4xl">
-            Operations Console
+            {getGreeting()}, {getDisplayName(adminEmail, "Admin")}!
           </h1>
+          <p className="text-sm text-slate-400">Operations Console</p>
         </header>
 
         {error && (
           <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
             {error}
+          </div>
+        )}
+
+        {successMessage && (
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+            {successMessage}
           </div>
         )}
 
@@ -623,7 +670,7 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
 
             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-[1fr_1fr_auto]">
               <select
-                className="rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400/70 focus:ring-2 focus:ring-cyan-500/30"
+                className="cursor-pointer rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400/70 focus:ring-2 focus:ring-cyan-500/30"
                 value={assignmentLecturerId}
                 onChange={(event) => setAssignmentLecturerId(event.target.value)}
               >
@@ -739,7 +786,7 @@ export default function AdminDashboard({ embedded = false }: AdminDashboardProps
                 onChange={(event) => setTokenCourseCode(event.target.value)}
               />
               <select
-                className="rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
+                className="cursor-pointer rounded-xl border border-slate-800/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30"
                 value={tokenLecturerId}
                 onChange={(event) => setTokenLecturerId(event.target.value)}
               >

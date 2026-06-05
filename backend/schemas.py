@@ -1,7 +1,10 @@
 from __future__ import annotations
 from typing import List, Optional
 from pydantic import BaseModel, Field
-from models import UserRole
+try:
+    from backend.models import UserRole
+except ImportError:
+    from models import UserRole
 
 class RegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255)
@@ -22,6 +25,12 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class CurrentUserResponse(BaseModel):
+    id: int
+    email: str
+    role: UserRole
 
 
 class FeedbackSubmitRequest(BaseModel):
@@ -181,6 +190,8 @@ class CourseBreakdown(BaseModel):
 
 
 class LecturerDashboardResponse(BaseModel):
+    viewed_lecturer_id: int
+    viewed_lecturer_email: str
     total_feedbacks: int
     avg_rating: Optional[float]
     cleaned_comments: List[str]

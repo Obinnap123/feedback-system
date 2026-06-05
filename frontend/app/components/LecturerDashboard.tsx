@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Chart as ChartJS,
@@ -12,7 +12,8 @@ import {
 } from "chart.js";
 import { Bar } from "react-chartjs-2";
 import { ChevronDown, Download, MessageSquare } from "lucide-react";
-import { fetchLecturerDashboard } from "../lib/api";
+import { fetchAdminLecturers, fetchLecturerDashboard } from "../lib/api";
+import { decodeTokenRole } from "../../utils/auth";
 
 ChartJS.register(
   CategoryScale,
@@ -29,6 +30,8 @@ type SemesterOption = {
 };
 
 type LecturerMetrics = {
+  viewed_lecturer_id: number;
+  viewed_lecturer_email: string;
   total_feedbacks: number;
   avg_rating: number | null;
   cleaned_comments: string[];
@@ -54,8 +57,34 @@ type LecturerMetrics = {
   last_synced_at: string;
 };
 
+type LecturerOption = {
+  id: number;
+  email: string;
+};
+
+type DashboardFilterSnapshot = {
+  lecturerValue?: string;
+  semesterValue?: string;
+  courseValue?: string;
+};
+
 const formatRating = (value: number | null) =>
   value === null || Number.isNaN(value) ? "-" : value.toFixed(2);
+
+const getGreeting = () => {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good Morning";
+  if (hour < 17) return "Good Afternoon";
+  return "Good Evening";
+};
+
+const getDisplayName = (email: string | null | undefined, fallback = "there") => {
+  if (!email) return fallback;
+  const localPart = email.split("@")[0] || "";
+  const firstName = localPart.split(/[._-]/).find(Boolean);
+  if (!firstName) return fallback;
+  return firstName.charAt(0).toUpperCase() + firstName.slice(1);
+};
 
 
 const getErrorMessage = (error: unknown): string => {
@@ -102,9 +131,26 @@ const getAuthToken = () => {
 const getTimeAgo = (timestamp: Date | null, now: number) => {
   if (!timestamp) return "Last synced: -";
   const diffMs = Math.max(0, now - timestamp.getTime());
-  const minutes = Math.floor(diffMs / 60000);
-  if (minutes <= 1) return "Last synced: just now";
-  return `Last synced: ${minutes} minutes ago`;
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 10) return "Last synced: just now";
+  if (seconds < 60) return `Last synced: ${seconds}s ago`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Last synced: ${minutes}m ago`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) {
+    return remainingMinutes > 0
+      ? `Last synced: ${hours}h ${remainingMinutes}m ago`
+      : `Last synced: ${hours}h ago`;
+  }
+
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours > 0
+    ? `Last synced: ${days}d ${remainingHours}h ago`
+    : `Last synced: ${days}d ago`;
 };
 
 type LecturerDashboardProps = {
@@ -116,15 +162,20 @@ export default function LecturerDashboard({
 }: LecturerDashboardProps) {
   const router = useRouter();
   const [token, setToken] = useState("");
+  const [role, setRole] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<LecturerMetrics | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lecturers, setLecturers] = useState<LecturerOption[]>([]);
+  const [selectedLecturerId, setSelectedLecturerId] = useState("");
   const [selectedSemester, setSelectedSemester] = useState("");
   const [selectedCourse, setSelectedCourse] = useState("");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [now, setNow] = useState(Date.now());
+  const latestRequestRef = useRef(0);
+  const dashboardCacheRef = useRef<Map<string, LecturerMetrics>>(new Map());
   const selectClassName =
-    "h-11 w-full appearance-none rounded-xl border border-slate-700/80 bg-slate-950/90 px-3 pr-10 text-sm text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30";
+    "h-11 w-full cursor-pointer appearance-none rounded-xl border border-slate-700/80 bg-slate-950/90 px-3 pr-10 text-sm text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] outline-none transition focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/30";
   const delta = metrics?.insight_delta ?? null;
   const deltaClass =
     delta === null
@@ -202,46 +253,87 @@ export default function LecturerDashboard({
     [],
   );
 
+  const getCacheKey = useCallback(
+    ({ lecturerValue, semesterValue, courseValue }: DashboardFilterSnapshot) =>
+      [
+        role || "LECTURER",
+        lecturerValue || "self",
+        semesterValue || "current",
+        courseValue || "all",
+      ].join("::"),
+    [role],
+  );
+
+  const applyDashboardData = useCallback((data: LecturerMetrics) => {
+    setMetrics(data);
+    if (data?.last_synced_at) {
+      setLastUpdated(new Date(data.last_synced_at));
+    } else {
+      setLastUpdated(new Date());
+    }
+    if (data?.selected_semester) {
+      setSelectedSemester(data.selected_semester);
+    }
+    if (typeof data?.selected_course === "string") {
+      setSelectedCourse(data.selected_course);
+    } else {
+      setSelectedCourse("");
+    }
+    if (typeof data?.viewed_lecturer_id === "number") {
+      setSelectedLecturerId(String(data.viewed_lecturer_id));
+    }
+  }, []);
+
   const loadDashboard = useCallback(async (
     activeToken: string,
+    lecturerValue?: string,
     semesterValue?: string,
     courseValue?: string,
+    options?: { preferCache?: boolean },
   ) => {
     if (!activeToken) return;
+    const filters = { lecturerValue, semesterValue, courseValue };
+    const cacheKey = getCacheKey(filters);
+    const cached = dashboardCacheRef.current.get(cacheKey);
+    if (options?.preferCache && cached) {
+      applyDashboardData(cached);
+      setLoading(false);
+      return;
+    }
+    const requestId = latestRequestRef.current + 1;
+    latestRequestRef.current = requestId;
     setLoading(true);
     setError(null);
     try {
       const response = await fetchLecturerDashboard(activeToken, {
+        ...(lecturerValue ? { lecturer_id: Number(lecturerValue) } : {}),
         ...(semesterValue ? { semester: semesterValue } : {}),
         ...(courseValue ? { course_code: courseValue } : {}),
       });
-      setMetrics(response.data);
-      if (response.data?.last_synced_at) {
-        setLastUpdated(new Date(response.data.last_synced_at));
-      } else {
-        setLastUpdated(new Date());
+      if (requestId !== latestRequestRef.current) {
+        return;
       }
-      if (response.data?.selected_semester) {
-        setSelectedSemester(response.data.selected_semester);
-      }
-      if (typeof response.data?.selected_course === "string") {
-        setSelectedCourse(response.data.selected_course);
-      } else {
-        setSelectedCourse("");
-      }
+      dashboardCacheRef.current.set(cacheKey, response.data);
+      applyDashboardData(response.data);
     } catch (errorResponse) {
-      setMetrics(null);
+      if (requestId !== latestRequestRef.current) {
+        return;
+      }
       const status = (errorResponse as { response?: { status?: number } })
         ?.response?.status;
       if (status === 401) {
         router.push("/login");
+      } else if (status === 403) {
+        setError("You do not have permission to view this lecturer dashboard.");
       } else {
         setError(getErrorMessage(errorResponse));
       }
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestRef.current) {
+        setLoading(false);
+      }
     }
-  }, [router]);
+  }, [applyDashboardData, getCacheKey, router]);
 
   useEffect(() => {
     const authToken = getAuthToken();
@@ -251,22 +343,60 @@ export default function LecturerDashboard({
       return;
     }
     setToken(authToken);
+    setRole(decodeTokenRole(authToken));
   }, [router]);
 
   useEffect(() => {
-    if (token) {
+    if (!token) return;
+    if (role === "ADMIN") {
+      void fetchAdminLecturers(token)
+        .then((response) => {
+          const options = response.data || [];
+          setLecturers(options);
+          setSelectedLecturerId((current) => current || (options[0] ? String(options[0].id) : ""));
+        })
+        .catch((errorResponse) => {
+          setLecturers([]);
+          setError(getErrorMessage(errorResponse));
+        });
+      return;
+    }
+    setLecturers([]);
+    setSelectedLecturerId("");
+  }, [role, token]);
+
+  useEffect(() => {
+    if (!token || role === "ADMIN") return;
+    const timer = window.setTimeout(() => {
       void loadDashboard(
         token,
+        undefined,
         selectedSemester || undefined,
         selectedCourse || undefined,
+        { preferCache: true },
       );
-    }
-  }, [token, selectedSemester, selectedCourse, loadDashboard]);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [token, role, selectedSemester, selectedCourse, loadDashboard]);
+
+  useEffect(() => {
+    if (!token || role !== "ADMIN" || !selectedLecturerId) return;
+    const timer = window.setTimeout(() => {
+      void loadDashboard(
+        token,
+        selectedLecturerId,
+        selectedSemester || undefined,
+        selectedCourse || undefined,
+        { preferCache: true },
+      );
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [token, role, selectedLecturerId, selectedSemester, selectedCourse, loadDashboard]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       setNow(Date.now());
-    }, 60000);
+    }, 1000);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -291,6 +421,7 @@ export default function LecturerDashboard({
         </head>
         <body>
           <h1>Lecturer Feedback Report</h1>
+          <div class="meta">Lecturer: ${metrics.viewed_lecturer_email}</div>
           <div class="meta">Semester: ${metrics.current_semester}</div>
           <div class="meta">Current Avg: ${formatRating(metrics.current_avg_rating)}</div>
           <div class="meta">Current Feedbacks: ${metrics.current_feedbacks}</div>
@@ -321,18 +452,40 @@ export default function LecturerDashboard({
       <div
         className={
           embedded
-            ? "flex w-full flex-col gap-8 px-6 py-10"
-            : "mx-auto flex w-full max-w-7xl flex-col gap-8 px-5 py-8 sm:px-6 lg:px-8 lg:py-10"
+            ? "relative flex w-full flex-col gap-8 px-6 py-10"
+            : "relative mx-auto flex w-full max-w-7xl flex-col gap-8 px-5 py-8 sm:px-6 lg:px-8 lg:py-10"
         }
       >
+        {loading && (
+          <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-[2rem] bg-slate-950/45 backdrop-blur-[2px]">
+            <div className="flex min-w-40 flex-col items-center gap-3 rounded-2xl border border-slate-700/70 bg-slate-950/90 px-6 py-5 shadow-2xl shadow-slate-950/50">
+              <div className="h-10 w-10 animate-spin rounded-full border-3 border-slate-700 border-t-indigo-400" />
+              <div className="text-center">
+                <p className="text-sm font-semibold text-white">Updating dashboard</p>
+                <p className="text-xs text-slate-400">
+                  Refreshing course and semester data...
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <p className="text-xs uppercase tracking-[0.3em] text-slate-400">
-              Lecturer Dashboard
+              {role === "ADMIN" ? "Admin Lecturer View" : "Lecturer Dashboard"}
             </p>
             <h1 className="text-3xl font-semibold text-white sm:text-4xl">
-              Your Teaching Snapshot
+              {getGreeting()}, {getDisplayName(metrics?.viewed_lecturer_email)}!
             </h1>
+            <p className="mt-2 text-sm text-slate-300">
+              {role === "ADMIN" ? "Lecturer Teaching Snapshot" : "Your Teaching Snapshot"}
+            </p>
+            {metrics?.viewed_lecturer_email && role === "ADMIN" && (
+              <p className="mt-2 text-sm text-slate-300">
+                Viewing lecturer: {metrics.viewed_lecturer_email}
+              </p>
+            )}
             <p className="mt-2 text-sm text-slate-400">
               Dashboard &gt; {(metrics?.current_semester || "Harmattan")} Semester
               {" "}(
@@ -341,7 +494,36 @@ export default function LecturerDashboard({
             </p>
           </div>
           <div className="w-full rounded-2xl border border-slate-800/70 bg-slate-900/70 p-4 xl:w-auto">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] xl:items-end">
+            <div className={`grid grid-cols-1 gap-3 sm:grid-cols-2 ${role === "ADMIN" ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto_auto]" : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]"} xl:items-end`}>
+              {role === "ADMIN" && (
+                <div className="flex flex-col gap-1">
+                  <label className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
+                    Lecturer
+                  </label>
+                  <div className="relative">
+                    <select
+                      className={selectClassName}
+                      value={selectedLecturerId}
+                      onChange={(event) => {
+                        setSelectedLecturerId(event.target.value);
+                        setSelectedCourse("");
+                        setSelectedSemester("");
+                      }}
+                    >
+                      {lecturers.length === 0 ? (
+                        <option value="">No lecturers available</option>
+                      ) : (
+                        lecturers.map((lecturer) => (
+                          <option key={lecturer.id} value={lecturer.id}>
+                            {lecturer.email}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  </div>
+                </div>
+              )}
               <div className="flex flex-col gap-1">
               <label className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
                 Course
@@ -391,6 +573,11 @@ export default function LecturerDashboard({
               <span className="text-xs text-slate-400">
                 {getTimeAgo(lastUpdated, now)}
               </span>
+              {lastUpdated && (
+                <span className="text-[11px] text-slate-500">
+                  {lastUpdated.toLocaleString()}
+                </span>
+              )}
               </div>
               <button
                 type="button"
@@ -483,7 +670,7 @@ export default function LecturerDashboard({
             <div>
               <p className="text-sm text-slate-400">Course Breakdown</p>
               <h2 className="text-lg font-semibold text-white">
-                Course-level averages
+                Course-level averages for the selected semester
               </h2>
             </div>
           </div>
@@ -552,7 +739,7 @@ export default function LecturerDashboard({
             <div>
               <p className="text-sm text-slate-400">Cleaned Feedbacks</p>
               <h2 className="text-lg font-semibold text-white">
-                Recent Student Comments
+                Recent Student Comments for the selected semester
               </h2>
             </div>
             <MessageSquare className="h-5 w-5 text-indigo-300" />
@@ -569,7 +756,7 @@ export default function LecturerDashboard({
               ))
             ) : (
               <div className="rounded-2xl border border-dashed border-slate-700/70 px-4 py-6 text-center text-sm text-slate-500">
-                No feedback received yet for this semester.
+                No feedback received yet for the selected semester.
               </div>
             )}
           </div>

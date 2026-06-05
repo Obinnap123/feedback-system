@@ -9,46 +9,88 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from database import get_db
-from models import (
-    User,
-    UserRole,
-    Feedback,
-    FeedbackFlagReview,
-    FeedbackToken,
-    ToxicityRejectedAttempt,
-    CourseAssignment,
-    FlagReviewAction,
-)
-from schemas import (
-    AdminDashboardResponse,
-    KPICard,
-    LecturerOption,
-    LecturerRatingResponse,
-    LeaderboardEntry,
-    ToxicityLogEntry,
-    ToxicityFeedEntry,
-    DismissFlagRequest,
-    ActionResponse,
-    LecturerDashboardResponse,
-    CourseBreakdown,
-    SemesterOption,
-)
-from dependencies import get_current_user, require_role
-from utils import (
-    log_admin_action,
-    pending_alerts_count,
-    resolve_semester,
-    semester_label,
-    semester_range_label,
-    semester_value,
-    semester_index,
-    semester_from_date,
-    semester_from_index,
-    semester_window,
-    parse_semester,
-    normalize_course_code,
-)
+try:
+    from backend.database import get_db
+    from backend.models import (
+        User,
+        UserRole,
+        Feedback,
+        FeedbackFlagReview,
+        FeedbackToken,
+        ToxicityRejectedAttempt,
+        CourseAssignment,
+        FlagReviewAction,
+    )
+    from backend.schemas import (
+        AdminDashboardResponse,
+        KPICard,
+        LecturerOption,
+        LecturerRatingResponse,
+        LeaderboardEntry,
+        ToxicityLogEntry,
+        ToxicityFeedEntry,
+        DismissFlagRequest,
+        ActionResponse,
+        LecturerDashboardResponse,
+        CourseBreakdown,
+        SemesterOption,
+    )
+    from backend.dependencies import get_current_user, require_role
+    from backend.utils import (
+        log_admin_action,
+        pending_alerts_count,
+        resolve_semester,
+        semester_label,
+        semester_range_label,
+        semester_value,
+        semester_index,
+        semester_from_date,
+        semester_from_index,
+        semester_window,
+        parse_semester,
+        normalize_course_code,
+    )
+except ImportError:
+    from database import get_db
+    from models import (
+        User,
+        UserRole,
+        Feedback,
+        FeedbackFlagReview,
+        FeedbackToken,
+        ToxicityRejectedAttempt,
+        CourseAssignment,
+        FlagReviewAction,
+    )
+    from schemas import (
+        AdminDashboardResponse,
+        KPICard,
+        LecturerOption,
+        LecturerRatingResponse,
+        LeaderboardEntry,
+        ToxicityLogEntry,
+        ToxicityFeedEntry,
+        DismissFlagRequest,
+        ActionResponse,
+        LecturerDashboardResponse,
+        CourseBreakdown,
+        SemesterOption,
+    )
+    from dependencies import get_current_user, require_role
+    from utils import (
+        log_admin_action,
+        pending_alerts_count,
+        resolve_semester,
+        semester_label,
+        semester_range_label,
+        semester_value,
+        semester_index,
+        semester_from_date,
+        semester_from_index,
+        semester_window,
+        parse_semester,
+        normalize_course_code,
+    )
 
 router = APIRouter(prefix="/dashboard", tags=["Analytics"])
 
@@ -437,52 +479,58 @@ def export_semester_summary(
 def lecturer_dashboard(
     semester: Optional[str] = None,
     course_code: Optional[str] = None,
-    user: User = Depends(require_role(UserRole.LECTURER)),
+    lecturer_id: Optional[int] = None,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> LecturerDashboardResponse:
     now = datetime.now(timezone.utc)
-    base_query = db.query(Feedback).filter(Feedback.lecturer_id == user.id)
+    if user.role == UserRole.LECTURER:
+        target_lecturer = user
+    elif user.role == UserRole.ADMIN:
+        if lecturer_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="lecturer_id is required for admin lecturer dashboard view",
+            )
+        target_lecturer = (
+            db.query(User)
+            .filter(User.id == lecturer_id, User.role == UserRole.LECTURER)
+            .first()
+        )
+        if not target_lecturer:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecturer not found",
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
+
+    assigned_courses = [
+        row[0]
+        for row in db.query(CourseAssignment.course_code)
+        .filter(CourseAssignment.lecturer_id == target_lecturer.id)
+        .order_by(CourseAssignment.course_code.asc())
+        .all()
+    ]
     normalized_course = normalize_course_code(course_code) if course_code else None
+    if normalized_course and normalized_course not in assigned_courses:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Course is not linked to this lecturer",
+        )
+
+    base_query = (
+        db.query(Feedback)
+        .filter(Feedback.lecturer_id == target_lecturer.id)
+        .filter(Feedback.course_code.in_(assigned_courses))
+    )
     scoped_query = base_query
     if normalized_course:
         scoped_query = scoped_query.filter(Feedback.course_code == normalized_course)
 
-    breakdown_rows = (
-        db.query(
-            Feedback.course_code.label("course_code"),
-            func.avg(Feedback.rating).label("avg_rating"),
-            func.count(Feedback.id).label("count"),
-        )
-        .filter(Feedback.lecturer_id == user.id)
-        .group_by(Feedback.course_code)
-        .order_by(Feedback.course_code.asc())
-        .all()
-    )
-    course_breakdown = [
-        CourseBreakdown(
-            course_code=row.course_code,
-            avg_rating=float(row.avg_rating) if row.avg_rating is not None else None,
-            count=int(row.count or 0),
-        )
-        for row in breakdown_rows
-        if row.course_code
-    ]
-    assigned_courses = [
-        row[0]
-        for row in db.query(CourseAssignment.course_code)
-        .filter(CourseAssignment.lecturer_id == user.id)
-        .order_by(CourseAssignment.course_code.asc())
-        .all()
-    ]
-    seen_courses = {item.course_code for item in course_breakdown}
-    for code in assigned_courses:
-        if code not in seen_courses:
-            course_breakdown.append(
-                CourseBreakdown(course_code=code, avg_rating=None, count=0)
-            )
-            seen_courses.add(code)
-    course_breakdown.sort(key=lambda item: item.course_code)
-    
     # Calculate semester range
     min_created = (
         scoped_query.with_entities(func.min(Feedback.created_at)).scalar()
@@ -568,10 +616,42 @@ def lecturer_dashboard(
         .filter(Feedback.created_at < prev_end)
         .scalar()
     )
-    distribution_rows = (
-        scoped_query.with_entities(Feedback.rating, func.count(Feedback.id))
-        .filter(Feedback.created_at >= selected_start)
+    total_feedbacks = scoped_query.count()
+    total_avg = scoped_query.with_entities(func.avg(Feedback.rating)).scalar()
+    semester_scoped_query = (
+        scoped_query.filter(Feedback.created_at >= selected_start)
         .filter(Feedback.created_at < selected_end)
+    )
+    breakdown_rows = (
+        semester_scoped_query.with_entities(
+            Feedback.course_code.label("course_code"),
+            func.avg(Feedback.rating).label("avg_rating"),
+            func.count(Feedback.id).label("count"),
+        )
+        .group_by(Feedback.course_code)
+        .order_by(Feedback.course_code.asc())
+        .all()
+    )
+    course_breakdown = [
+        CourseBreakdown(
+            course_code=row.course_code,
+            avg_rating=float(row.avg_rating) if row.avg_rating is not None else None,
+            count=int(row.count or 0),
+        )
+        for row in breakdown_rows
+        if row.course_code
+    ]
+    breakdown_map = {item.course_code: item for item in course_breakdown}
+    zero_fill_courses = [normalized_course] if normalized_course else assigned_courses
+    for code in zero_fill_courses:
+        if code and code not in breakdown_map:
+            course_breakdown.append(
+                CourseBreakdown(course_code=code, avg_rating=None, count=0)
+            )
+    course_breakdown.sort(key=lambda item: item.course_code)
+    available_courses = assigned_courses
+    distribution_rows = (
+        semester_scoped_query.with_entities(Feedback.rating, func.count(Feedback.id))
         .group_by(Feedback.rating)
         .all()
     )
@@ -593,9 +673,7 @@ def lecturer_dashboard(
 
     # Get recent comments (limit 50 for dashboard)
     recent_comments = (
-        scoped_query.filter(Feedback.text.isnot(None))
-        .filter(Feedback.created_at >= selected_start)
-        .filter(Feedback.created_at < selected_end)
+        semester_scoped_query.filter(Feedback.text.isnot(None))
         .order_by(Feedback.created_at.desc())
         .limit(50)
         .all()
@@ -606,7 +684,9 @@ def lecturer_dashboard(
     ]
 
     return LecturerDashboardResponse(
-        total_feedbacks=int(current_feedbacks),
+        viewed_lecturer_id=target_lecturer.id,
+        viewed_lecturer_email=target_lecturer.email,
+        total_feedbacks=int(total_feedbacks),
         avg_rating=float(current_avg) if current_avg is not None else None,
         cleaned_comments=cleaned_comments,
         current_semester=selected_label,
@@ -617,14 +697,14 @@ def lecturer_dashboard(
         previous_avg_rating=float(previous_avg) if previous_avg is not None else None,
         current_feedbacks=int(current_feedbacks),
         previous_feedbacks=int(previous_feedbacks),
-        total_avg_rating=float(current_avg) if current_avg is not None else None,
+        total_avg_rating=float(total_avg) if total_avg is not None else None,
         rating_distribution=rating_distribution,
         positive_pct=positive_pct,
         neutral_pct=neutral_pct,
         negative_pct=negative_pct,
         insight_delta=insight_delta,
         course_breakdown=course_breakdown,
-        available_courses=sorted(list(seen_courses)),
+        available_courses=available_courses,
         available_semesters=available_semesters,
         selected_semester=selected_value,
         selected_course=normalized_course,

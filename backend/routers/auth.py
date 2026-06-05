@@ -2,15 +2,40 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from passlib.exc import UnknownHashError
 
-from database import get_db
-from models import User, UserRole
-from schemas import RegisterRequest, RegisterResponse, LoginRequest, TokenResponse
-from dependencies import (
-    get_user_by_email,
-    pwd_context,
-    create_access_token,
-    _normalize_login_identifier
-)
+try:
+    from backend.database import get_db
+    from backend.models import User, UserRole
+    from backend.schemas import (
+        CurrentUserResponse,
+        RegisterRequest,
+        RegisterResponse,
+        LoginRequest,
+        TokenResponse,
+    )
+    from backend.dependencies import (
+        get_current_user,
+        get_user_by_email,
+        pwd_context,
+        create_access_token,
+        _normalize_login_identifier
+    )
+except ImportError:
+    from database import get_db
+    from models import User, UserRole
+    from schemas import (
+        CurrentUserResponse,
+        RegisterRequest,
+        RegisterResponse,
+        LoginRequest,
+        TokenResponse,
+    )
+    from dependencies import (
+        get_current_user,
+        get_user_by_email,
+        pwd_context,
+        create_access_token,
+        _normalize_login_identifier
+    )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -58,3 +83,8 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
 
     token = create_access_token({"sub": str(user.id), "role": user.role.value})
     return TokenResponse(access_token=token)
+
+
+@router.get("/me", response_model=CurrentUserResponse)
+def current_user_profile(user: User = Depends(get_current_user)) -> CurrentUserResponse:
+    return CurrentUserResponse(id=user.id, email=user.email, role=user.role)
