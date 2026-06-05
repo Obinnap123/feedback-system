@@ -8,8 +8,12 @@ from sqlalchemy.pool import StaticPool
 # Set env var before importing main to avoid database.py error
 os.environ["DATABASE_URL"] = "sqlite://"
 
-from database import Base, get_db
-from main import app
+try:
+    from backend.database import Base, get_db
+    from backend.main import app
+except ImportError:
+    from database import Base, get_db
+    from main import app
 
 # Create in-memory SQLite database for testing
 SQLALCHEMY_DATABASE_URL = "sqlite://"

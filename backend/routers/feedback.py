@@ -7,25 +7,46 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import get_db
-from models import (
-    User,
-    UserRole,
-    Feedback,
-    FeedbackToken,
-    StudentSessionSubmission,
-    TokenSession,
-    ToxicityRejectedAttempt,
-)
-from schemas import (
-    FeedbackSubmitRequest,
-    FeedbackSubmitResponse,
-    FeedbackModerationRequest,
-    FeedbackModerationResponse,
-    TokenStatusResponse,
-)
-from dependencies import require_role, ANON_KEY_SECRET
-from utils import toxicity_reason, default_session_label
+try:
+    from backend.database import get_db
+    from backend.models import (
+        User,
+        UserRole,
+        Feedback,
+        FeedbackToken,
+        StudentSessionSubmission,
+        TokenSession,
+        ToxicityRejectedAttempt,
+    )
+    from backend.schemas import (
+        FeedbackSubmitRequest,
+        FeedbackSubmitResponse,
+        FeedbackModerationRequest,
+        FeedbackModerationResponse,
+        TokenStatusResponse,
+    )
+    from backend.dependencies import require_role, ANON_KEY_SECRET
+    from backend.utils import toxicity_reason, default_session_label
+except ImportError:
+    from database import get_db
+    from models import (
+        User,
+        UserRole,
+        Feedback,
+        FeedbackToken,
+        StudentSessionSubmission,
+        TokenSession,
+        ToxicityRejectedAttempt,
+    )
+    from schemas import (
+        FeedbackSubmitRequest,
+        FeedbackSubmitResponse,
+        FeedbackModerationRequest,
+        FeedbackModerationResponse,
+        TokenStatusResponse,
+    )
+    from dependencies import require_role, ANON_KEY_SECRET
+    from utils import toxicity_reason, default_session_label
 
 router = APIRouter(prefix="/feedback", tags=["Feedback"])
 

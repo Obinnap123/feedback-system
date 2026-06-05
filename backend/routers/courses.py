@@ -10,31 +10,58 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from database import get_db
-from models import (
-    User,
-    UserRole,
-    CourseAssignment,
-    FeedbackToken,
-    TokenSession,
-)
-from schemas import (
-    CourseAssignmentCreateRequest,
-    CourseAssignmentResponse,
-    ActionResponse,
-    TokenGenerateRequest,
-    TokenGenerateResponse,
-    TokenListResponse,
-    TokenTrackerResponse,
-)
-from dependencies import get_current_user, require_role
-from utils import (
-    log_admin_action,
-    normalize_course_code,
-    normalize_session_key,
-    default_session_label,
-    resolve_semester,
-)
+try:
+    from backend.database import get_db
+    from backend.models import (
+        User,
+        UserRole,
+        CourseAssignment,
+        FeedbackToken,
+        TokenSession,
+    )
+    from backend.schemas import (
+        CourseAssignmentCreateRequest,
+        CourseAssignmentResponse,
+        ActionResponse,
+        TokenGenerateRequest,
+        TokenGenerateResponse,
+        TokenListResponse,
+        TokenTrackerResponse,
+    )
+    from backend.dependencies import get_current_user, require_role
+    from backend.utils import (
+        log_admin_action,
+        normalize_course_code,
+        normalize_session_key,
+        default_session_label,
+        resolve_semester,
+    )
+except ImportError:
+    from database import get_db
+    from models import (
+        User,
+        UserRole,
+        CourseAssignment,
+        FeedbackToken,
+        TokenSession,
+    )
+    from schemas import (
+        CourseAssignmentCreateRequest,
+        CourseAssignmentResponse,
+        ActionResponse,
+        TokenGenerateRequest,
+        TokenGenerateResponse,
+        TokenListResponse,
+        TokenTrackerResponse,
+    )
+    from dependencies import get_current_user, require_role
+    from utils import (
+        log_admin_action,
+        normalize_course_code,
+        normalize_session_key,
+        default_session_label,
+        resolve_semester,
+    )
 
 router = APIRouter(prefix="/dashboard/admin", tags=["Courses & Tokens"])
 

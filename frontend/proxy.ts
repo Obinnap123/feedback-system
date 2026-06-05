@@ -70,7 +70,11 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/dashboard/student", request.url));
   }
 
-  if (pathname.startsWith("/dashboard/lecturer") && role !== ROLE_LECTURER) {
+  if (
+    pathname.startsWith("/dashboard/lecturer") &&
+    role !== ROLE_LECTURER &&
+    role !== ROLE_ADMIN
+  ) {
     return NextResponse.redirect(new URL("/dashboard/student", request.url));
   }
 
