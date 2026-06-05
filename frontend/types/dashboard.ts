@@ -90,6 +90,8 @@ export interface SemesterOption {
 }
 
 export interface LecturerDashboardResponse {
+    viewed_lecturer_id: number;
+    viewed_lecturer_email: string;
     total_feedbacks: number;
     avg_rating: number | null;
     cleaned_comments: string[];

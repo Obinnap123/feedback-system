@@ -17,7 +17,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
-from database import Base
+try:
+    from backend.database import Base
+except ImportError:
+    from database import Base
 
 
 class UserRole(str, enum.Enum):

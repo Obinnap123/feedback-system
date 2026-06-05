@@ -8,7 +8,15 @@ from better_profanity import profanity
 from fastapi import HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from models import AdminAuditLog, Feedback, FeedbackFlagReview, ToxicityRejectedAttempt
+try:
+    from backend.models import (
+        AdminAuditLog,
+        Feedback,
+        FeedbackFlagReview,
+        ToxicityRejectedAttempt,
+    )
+except ImportError:
+    from models import AdminAuditLog, Feedback, FeedbackFlagReview, ToxicityRejectedAttempt
 
 profanity.load_censor_words()
 

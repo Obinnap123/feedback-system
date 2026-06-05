@@ -9,8 +9,12 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
-from database import get_db
-from models import User, UserRole
+try:
+    from backend.database import get_db
+    from backend.models import User, UserRole
+except ImportError:
+    from database import get_db
+    from models import User, UserRole
 
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ANON_KEY_SECRET = os.getenv("ANON_KEY_SECRET", "anon-secret-change-me")

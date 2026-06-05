@@ -5,8 +5,12 @@ from typing import List
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import Base, engine
-from routers import auth, feedback, courses, analytics
+try:
+    from backend.database import Base, engine
+    from backend.routers import auth, feedback, courses, analytics
+except ImportError:
+    from database import Base, engine
+    from routers import auth, feedback, courses, analytics
 
 # Create tables (dev only)
 Base.metadata.create_all(bind=engine)
